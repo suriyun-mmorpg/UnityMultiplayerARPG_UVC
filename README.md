@@ -50,16 +50,28 @@ Each crash reduces normalized engine condition and, when close enough, the neare
 
 At zero HP the adapter calls the kit's normal vehicle destruction path, including occupant removal and scene-vehicle respawn. The demo uses a 3-second destruction delay and a further 10-second respawn delay. Respawn resets mechanical condition. An authorized server action can call `UVCVehicleCrashDamage.Repair()` to restore HP and condition on a surviving vehicle; no client repair command or repair UI is provided. Impact settings and a server-side crash damage UnityEvent are exposed on the component.
 
+## Hitting characters
+
+`UVCVehicleHitDamage` is enabled on the demo car. Server chassis overlaps, sweeps between physics positions, and collision contacts detect character body colliders and trigger damage hitboxes. The configurable local-space hit volume should closely fit the chassis; select the component to see its red wireframe. Target Layers filters eligible colliders independently of the physics collision matrix. The kit's interaction trigger does not itself cause damage.
+
+The default minimum closing speed is 3 m/s. Raw body damage is `2 * (closingSpeed - 3)^2`, capped at 250, with a 0.75-second cooldown shared by all colliders of a character. The standard combat pipeline then applies body mitigation, armor, hit/miss/block/critical rules, combat text, aggro and kill credit. A 10 m/s direct hit supplies 98 raw damage; final HP loss depends on the combat rules. An empty Damage Element uses the kit's default element. Optional Knockback Speed uses the kit's movement-force system after a successful non-lethal hit; it defaults to zero.
+
+The current living driver is the instigator. Unoccupied cars, stationary overlaps, the car's own occupants, dead or invincible targets, and safe-area drivers/vehicles/targets are excluded. PvP, party, faction, guild and subchannel permissions go through `CanReceiveDamageFrom`; enabling vehicle hits does not enable PvP on a PvE map. The component never accepts client damage reports. Character HP and combat events use the kit's existing replication. Damage to characters is independent of whether the car itself can be attacked.
+
+Explicit movement-adapter teleports reset sweep history; large external position jumps are also rejected. Overlap relative velocity supports Unity CharacterController, NavMeshAgent and Rigidbody characters; custom movement implementations without these fall back to zero target velocity. Sweeps use the previous chassis orientation and skip large rotation jumps, so live tuning remains necessary for extreme angular speeds and latency.
+
 ## Editor tools and verification
 
 Under **Tools > MMORPG KIT > UVC Integration**:
 
 - **Create Demo Assets** builds the demo through Unity APIs when demo scenes do not already exist. It preserves existing authored demo scenes.
 - **Create Player Entity Prefabs** creates demo variants of the source database's available player entity prefabs, assigns their matching UVC class assets, and registers them in the demo database. It also repairs this setup in an existing demo.
-- **Configure Demo Networking** disables unsynchronized crash deformation and configures the existing demo prefab with crash damage and 1,000 HP.
+- **Configure Demo Networking** disables unsynchronized crash deformation and configures the existing demo prefab with crash damage, character hit damage and 1,000 HP.
 - **Validate Integration** checks serialization, driver generations, input ordering/timeouts, prediction gating, telemetry, rotation/teleports, database registration, seats and scene identities. It also runs an isolated server/two-client replica test using the real adapter packet methods over temporary localhost UDP sockets: passenger rejection, focus reset, ownership handover, stale input, predicted teleports and disable. Run outside Play Mode.
 
 Validation also covers impact thresholds/caps, duplicate contacts, cooldown, invincibility, client rejection, condition replication, matching handling modifiers, repairs, the lethal-damage destruction request and condition reset on respawn. The destruction test intercepts the network-destruction boundary; it does not run the kit's full live despawn/respawn cycle.
+
+Character-hit validation exercises actual overlap/sweep queries and the combat dispatch with an editor-only character fixture, plus the kit's PvE/PvP and party rules. It checks attribution, duplicate colliders, safe areas, passengers, client rejection and lethal dispatch. The fixture substitutes damage calculation and received-damage callbacks, so full live armor calculations, kill rewards, knockback and network death events still need gameplay testing.
 
 The entity creator also exposes the UVC movement factory for configured car prefabs. Add `UVCVehicleCrashDamage` and enable `VehicleEntity.canBeAttacked` to opt custom vehicles into crash damage.
 

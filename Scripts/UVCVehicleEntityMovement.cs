@@ -445,6 +445,7 @@ namespace MultiplayerARPG
                 return;
             Body.position = position;
             Body.rotation = rotation;
+            GetComponent<UVCVehicleHitDamage>()?.ResetSweepHistory();
             if (!stillMoveAfterTeleport)
             {
                 StopMove();

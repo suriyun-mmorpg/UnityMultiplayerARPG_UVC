@@ -226,6 +226,15 @@ namespace MultiplayerARPG
 
         private static void ConfigureCrashDamage(GameObject car)
         {
+            if (car.GetComponent<UVCVehicleHitDamage>() == null)
+                car.AddComponent<UVCVehicleHitDamage>();
+            var hitDamage = car.GetComponent<UVCVehicleHitDamage>();
+            var chassisBounds = car.GetComponent<BoxCollider>();
+            if (chassisBounds != null)
+            {
+                SetVector(hitDamage, "_center", chassisBounds.center);
+                SetVector(hitDamage, "_size", chassisBounds.size + Vector3.one * 0.05f);
+            }
             if (car.GetComponent<UVCVehicleCrashDamage>() == null)
                 car.AddComponent<UVCVehicleCrashDamage>();
             var entity = car.GetComponent<VehicleEntity>();

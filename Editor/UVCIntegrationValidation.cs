@@ -24,7 +24,8 @@ namespace MultiplayerARPG
             ValidateSnapshots();
             ValidateDemo();
             UVCMultiplayerValidation.Validate();
-            Debug.Log("UVC validation passed: input, ownership/timeout, prediction gating, telemetry, snapshot rotation/teleport, multiplayer packet routing, demo registration and scene identities.");
+            UVCVehicleHitDamageValidation.Validate();
+            Debug.Log("UVC validation passed: input, ownership/timeout, prediction, telemetry, snapshots, multiplayer routing, crash damage, character hit damage, combat permissions, demo registration and scene identities.");
         }
 
         private static void ValidateControlSessions()

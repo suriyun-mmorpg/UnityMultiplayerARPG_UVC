@@ -267,6 +267,10 @@ PrefabInstance:
         type: 3}
       insertIndex: -1
       addedObject: {fileID: 4260612393622771598}
+    - targetCorrespondingSourceObject: {fileID: 5439464000950848844, guid: 1570dfd1622e6294e970ed3ce6f78af5,
+        type: 3}
+      insertIndex: -1
+      addedObject: {fileID: 5498679453253278341}
   m_SourcePrefab: {fileID: 100100000, guid: 1570dfd1622e6294e970ed3ce6f78af5, type: 3}
 --- !u!4 &424924244333545526 stripped
 Transform:
@@ -977,3 +981,27 @@ MonoBehaviour:
   _onCrashDamage:
     m_PersistentCalls:
       m_Calls: []
+--- !u!114 &5498679453253278341
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1057909362649174668}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: fb854fcfc23a2cd42a5624ee71bd961e, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  _behaviourIndex: 0
+  _center: {x: 0.0000006556511, y: 0.6812368, z: -0.016556263}
+  _size: {x: 1.8617152, y: 1.4124736, z: 4.5495434}
+  _targetLayers:
+    serializedVersion: 2
+    m_Bits: 4294967295
+  _minimumImpactSpeed: 3
+  _damagePerSpeedSquared: 2
+  _maximumDamage: 250
+  _targetCooldown: 0.75
+  _damageElement: {fileID: 0}
+  _knockbackSpeed: 0
