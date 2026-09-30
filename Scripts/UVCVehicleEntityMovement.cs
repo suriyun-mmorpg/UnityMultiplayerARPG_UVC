@@ -1,0 +1,485 @@
+using System.Collections.Generic;
+using Cysharp.Threading.Tasks;
+using LiteNetLib.Utils;
+using LiteNetLibManager;
+using UnityEngine;
+
+namespace MultiplayerARPG
+{
+    /// <summary>
+    /// Server-authoritative UVC adapter. Clients send controls through the kit's movement channel;
+    /// the server simulates UVC and replicates body/wheel poses and drivetrain telemetry.
+    /// Owning drivers optionally predict physics with bounded server reconciliation.
+    /// </summary>
+    [DefaultExecutionOrder(-50)]
+    [RequireComponent(typeof(Rigidbody), typeof(PG.CarController))]
+    [DisallowMultipleComponent]
+    public class UVCVehicleEntityMovement : BaseNetworkedGameEntityComponent<BaseGameEntity>,
+        IEntityMovementComponent, IEntityMovementDataHandler, PG.ICarControl
+    {
+        [SerializeField, Min(0.1f)] private float _inputTimeout = 0.5f;
+        [SerializeField, Min(1f)] private float _interpolationSpeed = 15f;
+        [SerializeField, Min(0.1f)] private float _snapDistance = 10f;
+        [SerializeField, Min(0f)] private float _stoppingDistance = 1f;
+        [Header("Driver prediction")]
+        [SerializeField] private bool _enablePrediction = true;
+        [SerializeField, Min(0f)] private float _maxExtrapolation = 0.15f;
+        [SerializeField, Min(0.1f)] private float _reconciliationSpeed = 3f;
+        [SerializeField, Min(0.1f)] private float _predictionSnapDistance = 5f;
+
+        public PG.CarController Car { get; private set; }
+        public Rigidbody Body { get; private set; }
+        public UVCVehicleCrashDamage CrashDamage { get; private set; }
+        public float StoppingDistance => _stoppingDistance;
+        public MovementState MovementState { get; private set; }
+        public ExtraMovementState ExtraMovementState => ExtraMovementState.None;
+        public DirectionVector2 Direction2D { get; set; }
+        public float CurrentMoveSpeed => IsServer || _predicting ? Body.velocity.magnitude : _serverVelocity.magnitude;
+        public bool IsPredicting => _predicting;
+        public UVCVehicleTelemetry Telemetry => IsServer || _predicting ? UVCVehicleTelemetry.Capture(Car) : _telemetry;
+        public float Acceleration => CrashDamage != null && CrashDamage.enabled && CrashDamage.EngineCondition <= 0f ? 0f : _simulationInput.throttle;
+        public float BrakeReverse => _simulationInput.brakeReverse;
+        public float Horizontal => _simulationInput.steering;
+        public float Pitch => _simulationInput.pitch;
+        public bool HandBrake => _simulationInput.handbrake;
+        public bool Boost => _simulationInput.boost && (CrashDamage == null || !CrashDamage.enabled || CrashDamage.EngineCondition > 0f);
+
+        private UVCVehicleInput _localInput = UVCVehicleInput.Parked;
+        private UVCVehicleInput _simulationInput = UVCVehicleInput.Parked;
+        private readonly UVCVehicleControlSession _controls = new UVCVehicleControlSession();
+        private PG.Wheel[] _wheels;
+        private WheelCollider[] _wheelColliders;
+        private Vector3[] _wheelPositions;
+        private Quaternion[] _wheelRotations;
+        private Vector3 _serverPosition;
+        private Quaternion _serverRotation;
+        private Vector3 _serverVelocity;
+        private Vector3 _serverAngularVelocity;
+        private UVCVehicleTelemetry _telemetry;
+        private float _snapshotTime;
+        private float _snapshotTransitTime;
+        private bool _predicting;
+        private bool _simulating;
+        private bool _serverSimulationEnabled;
+        private long _snapshotOwnerId = long.MinValue;
+        private uint _snapshotDriverId;
+        private uint _receivedGeneration;
+        private bool _initialized;
+        private bool _hasSnapshot;
+        private long _snapshotTimestamp = long.MinValue;
+        private float _lastLocalInputTime = float.NegativeInfinity;
+        private uint _teleportRevision;
+        private uint _receivedTeleportRevision;
+        private readonly List<EntityMovementForceApplier> _forces = new List<EntityMovementForceApplier>();
+
+        private bool HasDriver => Entity is IVehicleEntity vehicle && vehicle.HasDriver;
+        private uint DriverId => HasDriver ? ((IVehicleEntity)Entity).GetPassenger(0).ObjectId : 0;
+        private bool IsLocalDriver => IsOwnerClient && HasDriver && ((IVehicleEntity)Entity).GetPassenger(0).IsOwnerClient;
+        private bool MatchesSnapshotDriver => _hasSnapshot && ConnectionId == _snapshotOwnerId && DriverId == _snapshotDriverId;
+        private bool CanDriveNow => HasDriver && Entity.CanMove() && !(Entity is IDamageableEntity damageable && damageable.IsDead());
+
+        private void Awake()
+        {
+            Car = GetComponent<PG.CarController>();
+            Body = GetComponent<Rigidbody>();
+            CrashDamage = GetComponent<UVCVehicleCrashDamage>();
+            _wheels = Car.Wheels;
+            _wheelColliders = GetComponentsInChildren<WheelCollider>(true);
+            _wheelPositions = new Vector3[_wheels.Length];
+            _wheelRotations = new Quaternion[_wheels.Length];
+            // Vendor player/AI inputs must not compete with the network adapter.
+            foreach (MonoBehaviour component in GetComponents<MonoBehaviour>())
+            {
+                if (component != this && component is PG.ICarControl)
+                    component.enabled = false;
+            }
+            Car.CarControl = this;
+            LiteNetLibTransform legacyTransform = GetComponent<LiteNetLibTransform>();
+            if (legacyTransform != null)
+                legacyTransform.enabled = false;
+            SetSimulation(false);
+        }
+
+        private void OnEnable()
+        {
+            if (Body != null)
+                RefreshSimulation();
+        }
+
+        private void OnDisable()
+        {
+            ResetControls();
+            if (IsServer) _controls.Invalidate();
+            _forces.Clear();
+            if (Body != null)
+                SetSimulation(false);
+        }
+
+        public override void OnIdentityInitialize()
+        {
+            _initialized = true;
+            _hasSnapshot = false;
+            _snapshotTimestamp = long.MinValue;
+            ResetControls();
+            _forces.Clear();
+            CurrentGameManager.EntityMovementDataHandlers[ObjectId] = this;
+            _controls.Invalidate();
+            RefreshInputOwner();
+            SetSimulation(IsServer && enabled);
+        }
+
+        public override void OnNetworkDestroy(byte reasons)
+        {
+            CurrentGameManager.EntityMovementDataHandlers.TryRemove(ObjectId, out _);
+            _initialized = false;
+            _hasSnapshot = false;
+            ResetControls();
+            _forces.Clear();
+            SetSimulation(false);
+        }
+
+        public override void OnSetOwnerClient(bool isOwnerClient)
+        {
+            ResetControls();
+            if (IsServer) _controls.Invalidate();
+            if (Car != null)
+            {
+                Car.IsPlayerVehicle = isOwnerClient;
+                Car.ResetUVCNetworkTransientState();
+                RefreshSimulation();
+            }
+        }
+
+        private void ResetControls()
+        {
+            _localInput = _simulationInput = UVCVehicleInput.Parked;
+            _lastLocalInputTime = float.NegativeInfinity;
+            _controls.ClearInput();
+        }
+
+        private void RefreshSimulation()
+        {
+            bool predict = _initialized && enabled && UVCVehiclePrediction.CanPredict(_enablePrediction && _serverSimulationEnabled,
+                IsServer, IsLocalDriver, _hasSnapshot, ConnectionId, DriverId, _snapshotOwnerId, _snapshotDriverId);
+            if (predict != _predicting)
+            {
+                _predicting = predict;
+                Car.ResetUVCNetworkTransientState();
+                // Start each owner from a known server pose; old local forces never survive a handover.
+                if (_hasSnapshot && !IsServer)
+                {
+                    Body.position = _serverPosition;
+                    Body.rotation = _serverRotation;
+                    Car.ApplyUVCNetworkTelemetry(_telemetry, 1f, false);
+                }
+            }
+            bool simulate = _initialized && enabled && (IsServer || predict);
+            if (simulate != _simulating)
+            {
+                SetSimulation(simulate);
+                if (predict)
+                {
+                    Body.velocity = _serverVelocity;
+                    Body.angularVelocity = _serverAngularVelocity;
+                }
+            }
+        }
+
+        private void SetSimulation(bool simulate)
+        {
+            _simulating = simulate;
+            if (!simulate) _predicting = false;
+            if (!simulate && !Body.isKinematic)
+            {
+                Body.velocity = Vector3.zero;
+                Body.angularVelocity = Vector3.zero;
+            }
+            Body.isKinematic = !simulate;
+            Car.IsLocalVehicle = simulate;
+            Car.enabled = simulate;
+            foreach (PG.Wheel wheel in _wheels)
+            {
+                if (wheel != null)
+                    wheel.enabled = simulate;
+            }
+            foreach (WheelCollider wheel in _wheelColliders)
+                wheel.enabled = simulate;
+        }
+
+        private void RefreshInputOwner()
+        {
+            if (IsServer && _controls.UpdateDriver(ConnectionId, DriverId))
+            {
+                _localInput = _simulationInput = UVCVehicleInput.Parked;
+                _lastLocalInputTime = float.NegativeInfinity;
+            }
+        }
+
+        private void FixedUpdate()
+        {
+            if (!_initialized)
+                return;
+            RefreshSimulation();
+            if (!IsServer && !_predicting)
+                return;
+            RefreshInputOwner();
+            _simulationInput = IsServer ? _controls.GetInput(Time.unscaledTime, _inputTimeout, CanDriveNow)
+                : CanDriveNow && Time.unscaledTime - _lastLocalInputTime <= _inputTimeout ? _localInput : UVCVehicleInput.Parked;
+            if (_predicting)
+                ReconcilePrediction();
+            MovementState = Car.VehicleIsGrounded ? MovementState.IsGrounded : MovementState.None;
+            if (Body.velocity.sqrMagnitude > 0.01f)
+                MovementState |= Vector3.Dot(Body.velocity, transform.forward) < 0f ? MovementState.Backward : MovementState.Forward;
+            _forces.UpdateForces(Time.fixedDeltaTime, 0f, out Vector3 forceVelocity, out EntityMovementForceApplier replacement);
+            if (replacement != null)
+                Body.velocity = replacement.Velocity + forceVelocity;
+            else if (forceVelocity.sqrMagnitude > 0f)
+                Body.AddForce(forceVelocity * Time.fixedDeltaTime, ForceMode.VelocityChange);
+        }
+
+        private void LateUpdate()
+        {
+            if (!_initialized || IsServer || !_hasSnapshot)
+                return;
+            RefreshSimulation();
+            if (_predicting)
+                return;
+            float factor = 1f - Mathf.Exp(-_interpolationSpeed * Time.deltaTime);
+            Car.ApplyUVCNetworkTelemetry(_telemetry, factor, true);
+            Body.position = Vector3.Lerp(Body.position, _serverPosition, factor);
+            Body.rotation = Quaternion.Slerp(Body.rotation, _serverRotation, factor);
+            for (int i = 0; i < _wheels.Length; ++i)
+            {
+                if (_wheels[i] == null || _wheels[i].WheelView == null)
+                    continue;
+                Transform view = _wheels[i].WheelView;
+                view.SetPositionAndRotation(transform.TransformPoint(_wheelPositions[i]), transform.rotation * _wheelRotations[i]);
+            }
+        }
+
+        public void SetInput(UVCVehicleInput input)
+        {
+            if (!_initialized || !enabled || !IsLocalDriver)
+                return;
+            RefreshInputOwner();
+            _localInput = input.Sanitize();
+            _lastLocalInputTime = Time.unscaledTime;
+            if (IsServer)
+                _controls.SetLocal(_localInput, Time.unscaledTime);
+        }
+
+        public bool WriteClientState(long writeTimestamp, NetDataWriter writer, out bool shouldSendReliably)
+        {
+            shouldSendReliably = false;
+            if (!_initialized || !IsLocalDriver || !MatchesSnapshotDriver)
+                return false;
+            writer.Put(_receivedGeneration);
+            (enabled && Time.unscaledTime - _lastLocalInputTime <= _inputTimeout ? _localInput : UVCVehicleInput.Parked).Write(writer);
+            return true;
+        }
+
+        public void ReadClientStateAtServer(long peerTimestamp, NetDataReader reader)
+        {
+            uint generation = reader.GetUInt();
+            UVCVehicleInput input = UVCVehicleInput.Read(reader);
+            if (!IsServer || !enabled || !HasDriver)
+                return;
+            RefreshInputOwner();
+            // BaseGameNetworkManager already validates the packet's connection against this owner.
+            if (((IVehicleEntity)Entity).GetPassenger(0).ConnectionId != ConnectionId)
+                return;
+            _controls.Accept(generation, peerTimestamp, input, Time.unscaledTime);
+        }
+
+        public bool WriteServerState(long writeTimestamp, NetDataWriter writer, out bool shouldSendReliably)
+        {
+            shouldSendReliably = false;
+            if (!_initialized || !IsServer)
+                return false;
+            RefreshInputOwner();
+            writer.Put(_teleportRevision);
+            writer.Put(_controls.Generation);
+            writer.Put(_controls.OwnerId);
+            writer.Put(_controls.DriverId);
+            writer.Put(enabled);
+            writer.PutVector3(Body.position);
+            writer.PutQuaternion(Body.rotation);
+            writer.PutVector3(Body.velocity);
+            writer.PutVector3(Body.angularVelocity);
+            UVCVehicleTelemetry.Capture(Car).Write(writer);
+            bool hasDamage = CrashDamage != null && CrashDamage.enabled;
+            writer.Put(hasDamage ? CrashDamage.EngineCondition : 1f);
+            writer.Put((uint)MovementState);
+            writer.Put((ushort)_wheels.Length);
+            for (int i = 0; i < _wheels.Length; ++i)
+            {
+                PG.Wheel wheel = _wheels[i];
+                Transform view = wheel != null ? wheel.WheelView : null;
+                writer.PutVector3(view != null ? transform.InverseTransformPoint(view.position) : Vector3.zero);
+                writer.PutQuaternion(view != null ? Quaternion.Inverse(transform.rotation) * view.rotation : Quaternion.identity);
+                writer.Put(hasDamage ? CrashDamage.GetWheelCondition(i) : 1f);
+            }
+            return true;
+        }
+
+        public void ReadServerStateAtClient(long peerTimestamp, NetDataReader reader)
+        {
+            uint revision = reader.GetUInt();
+            uint generation = reader.GetUInt();
+            long ownerId = reader.GetLong();
+            uint driverId = reader.GetUInt();
+            bool serverSimulationEnabled = reader.GetBool();
+            Vector3 position = reader.GetVector3();
+            Quaternion rotation = reader.GetQuaternion();
+            Vector3 velocity = reader.GetVector3();
+            Vector3 angularVelocity = reader.GetVector3();
+            UVCVehicleTelemetry telemetry = UVCVehicleTelemetry.Read(reader);
+            float engineCondition = reader.GetFloat();
+            MovementState movementState = (MovementState)reader.GetUInt();
+            int wheelCount = reader.GetUShort();
+            bool accept = !IsServer && peerTimestamp > _snapshotTimestamp && wheelCount == _wheels.Length;
+            for (int i = 0; i < wheelCount; ++i)
+            {
+                Vector3 wheelPosition = reader.GetVector3();
+                Quaternion wheelRotation = reader.GetQuaternion();
+                float wheelCondition = reader.GetFloat();
+                if (accept)
+                {
+                    _wheelPositions[i] = wheelPosition;
+                    _wheelRotations[i] = wheelRotation;
+                    if (CrashDamage != null) CrashDamage.SetReplicatedWheelCondition(i, wheelCondition);
+                }
+            }
+            if (!accept)
+                return;
+            if (CrashDamage != null) CrashDamage.SetReplicatedEngineCondition(engineCondition);
+            _snapshotTimestamp = peerTimestamp;
+            bool newSession = !_hasSnapshot || generation != _receivedGeneration;
+            bool teleport = !_hasSnapshot || revision != _receivedTeleportRevision;
+            if (newSession)
+                ResetControls();
+            if (teleport || newSession || Vector3.Distance(Body.position, position) > (_predicting ? _predictionSnapDistance : _snapDistance))
+            {
+                Body.position = position;
+                Body.rotation = rotation;
+                if (!Body.isKinematic)
+                {
+                    Body.velocity = velocity;
+                    Body.angularVelocity = angularVelocity;
+                }
+                Car.ResetUVCNetworkTransientState();
+            }
+            _receivedTeleportRevision = revision;
+            _receivedGeneration = generation;
+            _snapshotOwnerId = ownerId;
+            _snapshotDriverId = driverId;
+            _serverSimulationEnabled = serverSimulationEnabled;
+            _serverPosition = position;
+            _serverRotation = rotation;
+            _serverVelocity = velocity;
+            _serverAngularVelocity = angularVelocity;
+            _telemetry = telemetry;
+            if (!_predicting)
+                _simulationInput = new UVCVehicleInput { throttle = telemetry.acceleration, brakeReverse = telemetry.brake,
+                    handbrake = telemetry.handbrake, boost = telemetry.boosting };
+            _snapshotTime = Time.unscaledTime;
+            _snapshotTransitTime = Entity != null && CurrentGameManager != null ? Mathf.Min(_maxExtrapolation, CurrentGameManager.Rtt * 0.0005f) : 0f;
+            MovementState = movementState;
+            _hasSnapshot = true;
+            if (_predicting && (teleport || newSession))
+                Car.ApplyUVCNetworkTelemetry(telemetry, 1f, false);
+        }
+
+        private void ReconcilePrediction()
+        {
+            float age = Time.unscaledTime - _snapshotTime;
+            // A disconnected owner must not keep predicting indefinitely or keep the throttle held.
+            if (age > _inputTimeout)
+            {
+                _simulationInput = UVCVehicleInput.Parked;
+                return;
+            }
+            float lead = UVCVehiclePrediction.ExtrapolationTime(age + _snapshotTransitTime, _maxExtrapolation);
+            Vector3 target = _serverPosition + _serverVelocity * lead;
+            Quaternion rotation = UVCVehiclePrediction.ExtrapolateRotation(_serverRotation, _serverAngularVelocity, lead);
+            float blend = 1f - Mathf.Exp(-_reconciliationSpeed * Time.fixedDeltaTime);
+            if (Vector3.Distance(Body.position, target) > _predictionSnapDistance)
+                blend = 1f;
+            Body.position = Vector3.Lerp(Body.position, target, blend);
+            Body.rotation = Quaternion.Slerp(Body.rotation, rotation, blend);
+            Body.velocity = Vector3.Lerp(Body.velocity, _serverVelocity, blend);
+            Body.angularVelocity = Vector3.Lerp(Body.angularVelocity, _serverAngularVelocity, blend);
+            // Keep local engine response, but the server owns consumable boost fuel.
+            Car.ApplyUVCNetworkBoostAmount(_telemetry.boostAmount);
+        }
+
+        public Bounds GetMovementBounds()
+        {
+            Bounds bounds = new Bounds(transform.position, Vector3.zero);
+            foreach (Collider collider in GetComponentsInChildren<Collider>())
+            {
+                if (!collider.isTrigger && !(collider is WheelCollider))
+                    bounds.Encapsulate(collider.bounds);
+            }
+            return bounds;
+        }
+
+        public void StopMove()
+        {
+            ResetControls();
+        }
+
+        // Generic locomotion commands do not steer a car or rotate its physical body.
+        // UVCVehiclePlayerController exclusively supplies SetInput instead.
+        public void KeyMovement(Vector3 moveDirection, MovementState moveState) { }
+        public void PointClickMovement(Vector3 position) { }
+        public void SetExtraMovementState(ExtraMovementState state) { }
+        public void SetLookRotation(Quaternion rotation, bool immediately) { }
+        public Quaternion GetLookRotation() => Body.rotation;
+        public void SetSmoothTurnSpeed(float speed) { }
+        public float GetSmoothTurnSpeed() => 0f;
+
+        public void Teleport(Vector3 position, Quaternion rotation, bool stillMoveAfterTeleport)
+        {
+            if (!IsServer)
+                return;
+            Body.position = position;
+            Body.rotation = rotation;
+            if (!stillMoveAfterTeleport)
+            {
+                StopMove();
+                Body.velocity = Vector3.zero;
+                Body.angularVelocity = Vector3.zero;
+                _forces.Clear();
+            }
+            ++_teleportRevision;
+        }
+
+        public bool FindGroundedPosition(Vector3 fromPosition, float findDistance, out Vector3 result)
+        {
+            result = fromPosition;
+            return false; // Keep the requested chassis height; snapping its origin buries the wheels.
+        }
+
+        public void ApplyForce(ApplyMovementForceMode mode, Vector3 direction, ApplyMovementForceSourceType sourceType,
+            int sourceDataId, int sourceLevel, float force, float deceleration, float duration, bool clearForces)
+        {
+            if (!IsServer)
+                return;
+            if (clearForces)
+                _forces.Clear();
+            _forces.Add(new EntityMovementForceApplier().Apply(mode, direction, sourceType, sourceDataId, sourceLevel, force, deceleration, duration));
+        }
+
+        public EntityMovementForceApplier FindForceByActionKey(ApplyMovementForceSourceType sourceType, int sourceDataId) => _forces.FindBySource(sourceType, sourceDataId);
+        public void ClearAllForces() { if (IsServer) _forces.Clear(); }
+        public bool AllowToJump() => false;
+        public bool AllowToDash() => false;
+        public bool AllowToCrouch() => false;
+        public bool AllowToCrawl() => false;
+        public bool AllowToStand() => true;
+        // Teleport revisions are server authoritative; clients apply them from movement snapshots.
+        public UniTask WaitClientTeleportConfirm() => UniTask.CompletedTask;
+        public bool IsWaitingClientTeleportConfirm() => false;
+    }
+}
