@@ -25,6 +25,8 @@ namespace MultiplayerARPG
             ValidateDemo();
             UVCMultiplayerValidation.Validate();
             UVCVehicleHitDamageValidation.Validate();
+            if (AssetDatabase.LoadAssetAtPath<GameObject>(UVCMotorcycleDemoBuilder.PrefabPath) != null)
+                UVCMultiplayerValidation.Validate(UVCMotorcycleDemoBuilder.PrefabPath);
             Debug.Log("UVC validation passed: input, ownership/timeout, prediction, telemetry, snapshots, multiplayer routing, crash damage, character hit damage, combat permissions, demo registration and scene identities.");
         }
 
@@ -139,6 +141,10 @@ namespace MultiplayerARPG
                 movement.ReadServerStateAtClient(101, mismatch);
                 Check(mismatch.AvailableBytes == 0 && body.position == new Vector3(1, 2, 3),
                     "Mismatched wheel counts must not corrupt the following movement packet.");
+                var visualMismatch = Snapshot(0, Vector3.one * 30f, Quaternion.identity, 0, 1);
+                movement.ReadServerStateAtClient(101, visualMismatch);
+                Check(visualMismatch.AvailableBytes == 0 && body.position == new Vector3(1, 2, 3),
+                    "Mismatched additional visual counts must be consumed without accepting the snapshot.");
                 var teleport = Snapshot(1, new Vector3(2, 2, 3), Quaternion.identity);
                 movement.ReadServerStateAtClient(102, teleport);
                 Check(body.position == new Vector3(2, 2, 3), "A new teleport revision must snap even over a short distance.");
@@ -149,7 +155,7 @@ namespace MultiplayerARPG
         private static void SetField(object target, string name, object value) =>
             target.GetType().GetField(name, BindingFlags.NonPublic | BindingFlags.Instance).SetValue(target, value);
 
-        private static NetDataReader Snapshot(uint revision, Vector3 position, Quaternion rotation, ushort wheels = 0)
+        private static NetDataReader Snapshot(uint revision, Vector3 position, Quaternion rotation, ushort wheels = 0, ushort visuals = 0)
         {
             var writer = new NetDataWriter();
             writer.Put(revision); writer.Put(1u); writer.Put(-1L); writer.Put(0u); writer.Put(true);
@@ -157,11 +163,15 @@ namespace MultiplayerARPG
             writer.PutVector3(Vector3.zero); writer.PutVector3(Vector3.zero);
             default(UVCVehicleTelemetry).Write(writer);
             writer.Put(1f);
-            writer.Put((uint)MovementState.IsGrounded); writer.Put(wheels);
+            writer.Put((uint)MovementState.IsGrounded); writer.Put(visuals); writer.Put(wheels);
             for (int i = 0; i < wheels; ++i)
             {
                 writer.PutVector3(Vector3.zero); writer.PutQuaternion(Quaternion.identity);
                 writer.Put(1f);
+            }
+            for (int i = 0; i < visuals; ++i)
+            {
+                writer.PutVector3(Vector3.zero); writer.PutQuaternion(Quaternion.identity);
             }
             return new NetDataReader(writer.CopyData());
         }
@@ -192,8 +202,33 @@ namespace MultiplayerARPG
             Check(db.mapInfos.Contains(map), "Demo map must be registered.");
             var controls = AssetDatabase.LoadAssetAtPath<GameObject>(root + "Prefabs/PlayerCharacterController_UVC.prefab");
             var mappings = new SerializedObject(controls.GetComponent<BasePlayerCharacterController>()).FindProperty("vehicleControllers");
-            Check(mappings.arraySize == 1 && mappings.GetArrayElementAtIndex(0).FindPropertyRelative("controllersForEachSeats").arraySize == 2,
+            var motorcycle = AssetDatabase.LoadAssetAtPath<GameObject>(UVCMotorcycleDemoBuilder.PrefabPath);
+            Check(mappings.arraySize >= 1 && mappings.GetArrayElementAtIndex(0).FindPropertyRelative("controllersForEachSeats").arraySize == 2,
                 "Driver and passenger controller mappings are required.");
+            if (motorcycle != null)
+            {
+                var bike = motorcycle.GetComponent<PG.BikeController>();
+                var bikeEntity = motorcycle.GetComponent<VehicleEntity>();
+                Check(bike != null && bike.Wheels.Length == 2 && bike.RearForkParent != null && bikeEntity.Seats.Count == 1,
+                    "Motorcycle requires two wheels, an authored fork parent and one driver seat.");
+                Check(bike.Bike.MaxSqrGForceForCrash == float.MaxValue && bike.Bike.MaxReverseSpeedForCrash == float.MaxValue,
+                    "Motorcycle must use synchronized kit damage rather than UVC's local crash latch.");
+                Check(new SerializedObject(motorcycle.GetComponent<UVCVehicleEntityMovement>()).FindProperty("_additionalVisuals").arraySize == 4,
+                    "Motorcycle moving parts must be synchronized.");
+                var bikeType = AssetDatabase.LoadAssetAtPath<VehicleType>(UVCMotorcycleDemoBuilder.TypePath);
+                bool mapped = false;
+                for (int i = 0; i < mappings.arraySize; ++i)
+                {
+                    var entry = mappings.GetArrayElementAtIndex(i);
+                    if (entry.FindPropertyRelative("vehicleType").objectReferenceValue != bikeType) continue;
+                    var seats = entry.FindPropertyRelative("controllersForEachSeats");
+                    mapped = seats.arraySize == 1 && seats.GetArrayElementAtIndex(0).objectReferenceValue is UVCMotorcyclePlayerController;
+                }
+                Check(mapped, "Motorcycle must route driver input through its pitch-capable controller.");
+#if !EXCLUDE_PREFAB_REFS || DISABLE_ADDRESSABLES
+                Check(db.vehicleEntities.Contains(bikeEntity), "Motorcycle must be registered in the demo database.");
+#endif
+            }
             string scenePath = root + "Scenes/UVCDrivingDemo.unity";
             var scene = UnityEngine.SceneManagement.SceneManager.GetSceneByPath(scenePath);
             bool alreadyLoaded = scene.IsValid() && scene.isLoaded;
@@ -202,7 +237,8 @@ namespace MultiplayerARPG
             try
             {
                 var ids = scene.GetRootGameObjects().SelectMany(go => go.GetComponentsInChildren<LiteNetLibIdentity>(true)).ToArray();
-                Check(ids.Length == 2 && ids.Select(id => id.SceneObjectId).Distinct().Count() == 2 &&
+                int expectedVehicles = motorcycle == null ? 2 : 3;
+                Check(ids.Length == expectedVehicles && ids.Select(id => id.SceneObjectId).Distinct().Count() == expectedVehicles &&
                     ids.All(id => !string.IsNullOrEmpty(id.SceneObjectId)), "Demo cars require unique scene object identities.");
             }
             finally { if (!alreadyLoaded) EditorSceneManager.CloseScene(scene, true); }

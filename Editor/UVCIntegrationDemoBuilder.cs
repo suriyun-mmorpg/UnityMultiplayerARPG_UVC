@@ -216,7 +216,7 @@ namespace MultiplayerARPG
             finally { PrefabUtility.UnloadPrefabContents(prefab); }
         }
 
-        private static void DisableDemoDeformation(GameObject car)
+        internal static void DisableDemoDeformation(GameObject car)
         {
             // The demo uses kit gameplay damage. UVC deformation would create
             // different colliders on the server and predicting owner without damage replication.
@@ -224,7 +224,7 @@ namespace MultiplayerARPG
                 SetFloat(damage, "DamageFactor", 0f);
         }
 
-        private static void ConfigureCrashDamage(GameObject car)
+        internal static void ConfigureCrashDamage(GameObject car)
         {
             if (car.GetComponent<UVCVehicleHitDamage>() == null)
                 car.AddComponent<UVCVehicleHitDamage>();
