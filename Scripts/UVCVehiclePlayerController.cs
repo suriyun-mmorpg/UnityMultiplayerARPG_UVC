@@ -39,11 +39,13 @@ namespace MultiplayerARPG
                 brakeReverse = string.IsNullOrEmpty(_brakeReverseAxis) ? Mathf.Max(0f, -pedals) : ReadAxis(_brakeReverseAxis),
                 handbrake = !string.IsNullOrEmpty(_handbrakeButton) && InputManager.GetButton(_handbrakeButton),
                 boost = !string.IsNullOrEmpty(_boostButton) && InputManager.GetButton(_boostButton),
+                pitch = ReadPitch(),
             };
             _movement.SetInput(input);
         }
 
         private static float ReadAxis(string name) => string.IsNullOrEmpty(name) ? 0f : InputManager.GetAxis(name, false);
+        protected virtual float ReadPitch() => 0f;
 
         protected override void ResetInput()
         {
@@ -60,6 +62,7 @@ namespace MultiplayerARPG
         public void SetBrakeReverse(float value) { _useMobileInput = true; _mobileInput.brakeReverse = value; }
         public void SetHandbrake(bool value) { _useMobileInput = true; _mobileInput.handbrake = value; }
         public void SetBoost(bool value) { _useMobileInput = true; _mobileInput.boost = value; }
+        public void SetPitch(float value) { _useMobileInput = true; _mobileInput.pitch = value; }
         public void UseBoundInputs() { _useMobileInput = false; _mobileInput = default; }
     }
 }

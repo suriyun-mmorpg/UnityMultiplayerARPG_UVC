@@ -6,7 +6,7 @@ Connects PG's Universal Vehicle Controller cars to MMORPG KIT vehicles and its p
 
 1. Open `Demo/Scenes/00Init_UVC.unity`, then enter Play Mode.
 2. Use the kit's Single Player or Host flow and create a **new character** using one of the demo classes. Their starting map is `UVCDrivingDemo`; existing saved characters keep their previous map.
-3. Approach either car and use the kit's normal vehicle interaction. Seat 0 drives; seat 1 is a passenger. Both use the vehicle camera/exit controller.
+3. Approach either car or the motorcycle parked beside them and use the kit's normal vehicle interaction. Cars have a driver and passenger seat; the motorcycle has one driver seat. All use the vehicle camera/exit controller.
 
 | Input binding | Default keyboard input | Action |
 | --- | --- | --- |
@@ -17,8 +17,17 @@ Connects PG's Universal Vehicle Controller cars to MMORPG KIT vehicles and its p
 | Sprint | Shift | Boost (enabled on the demo car) |
 | ExitVehicle | Project-configured binding | Leave seat |
 | CameraRotate | Project-configured binding | Camera control inherited from the kit |
+| Motorcycle pitch | Q / E | Lean back / forward on the ground; pitch in the air |
 
-The demo includes two instances of the S34 vehicle prefab variant, driver/passenger controller mappings, a driving pad, slalom markers, a ramp, a separate database and four cloned starting classes. Generated scenes are added to Build Settings alongside the existing home scene. For a demo build, put `00Init_UVC` first in the enabled scene list.
+The demo includes two S34 cars and one motorcycle prefab variant, seat-specific controller mappings, a driving pad, slalom markers, a ramp, a separate database and four cloned starting classes. Generated scenes are added to Build Settings alongside the existing home scene. For a demo build, put `00Init_UVC` first in the enabled scene list.
+
+### Motorcycle
+
+`Demo/Prefabs/UVC_Motorcycle_Vehicle.prefab` uses the vendor `PG.BikeController` with the same network movement, prediction, engine telemetry, crash damage and character hit damage as the cars. Its type is `uvc_motorcycle`, routed to `UVCMotorcyclePlayerController`. Q/E supplies the bike's pitch control; a configured Pitch Axis can replace these keys. Mobile UI can call the inherited `SetPitch(-1..1)` and must send zero on release.
+
+Body lean, wheels, handlebars and forks synchronize to observers. The rear fork parent is authored in the prefab so the vendor does not create a different hierarchy at runtime. The local UVC crash latch is disabled through its two thresholds because its private state is not replicated; the motorcycle uses the kit's HP, engine/wheel condition and destruction path instead. UVC's balancing and steering remain active. The rider is hidden until a suitable riding animation/IK pose is provided. The bike retains 1,000 HP and boost for this demo.
+
+Use **Tools > MMORPG KIT > UVC Integration > Add Motorcycle Demo** to add the bike to an existing driving demo. Rerunning it preserves the motorcycle prefab and avoids duplicate scene vehicles, database entries and controller mappings.
 
 ## Runtime setup
 
@@ -40,7 +49,7 @@ Snapshots also carry RPM, gear, engine state/load, throttle/brake, turbo, boost 
 
 The telemetry bridge extends UVC's partial `PG.CarController` in this submodule. It must compile in the same assembly as the vendor partials (the supplied package uses `Assembly-CSharp`). It uses neither reflection nor changes to vendor files. If you add assembly definitions, keep all these partials together.
 
-The movement wire format changed: update the server and all clients together. Snapshots include engine and per-wheel condition. UVC crash deformation/debris, tire-surface audio, trailers and manual gear controls are not replicated. The demo disables vendor crash deformation so server and predicted colliders stay consistent. For custom vehicles, also disable unsynchronized deformation before enabling prediction.
+The movement wire format changed: update the server and all clients together. Snapshots include engine and per-wheel condition plus an ordered array of additional visual poses for motorcycle forks/handlebars. The server and clients must use matching visual arrays. UVC crash deformation/debris, tire-surface audio, trailers and manual gear controls are not replicated. The demo disables vendor crash deformation so server and predicted colliders stay consistent. For custom vehicles, also disable unsynchronized deformation before enabling prediction.
 
 ## Crash damage
 
@@ -50,16 +59,31 @@ Each crash reduces normalized engine condition and, when close enough, the neare
 
 At zero HP the adapter calls the kit's normal vehicle destruction path, including occupant removal and scene-vehicle respawn. The demo uses a 3-second destruction delay and a further 10-second respawn delay. Respawn resets mechanical condition. An authorized server action can call `UVCVehicleCrashDamage.Repair()` to restore HP and condition on a surviving vehicle; no client repair command or repair UI is provided. Impact settings and a server-side crash damage UnityEvent are exposed on the component.
 
+## Hitting characters
+
+`UVCVehicleHitDamage` is enabled on the demo car. Server chassis overlaps, sweeps between physics positions, and collision contacts detect character body colliders and trigger damage hitboxes. The configurable local-space hit volume should closely fit the chassis; select the component to see its red wireframe. Target Layers filters eligible colliders independently of the physics collision matrix. The kit's interaction trigger does not itself cause damage.
+
+The default minimum closing speed is 3 m/s. Raw body damage is `2 * (closingSpeed - 3)^2`, capped at 250, with a 0.75-second cooldown shared by all colliders of a character. The standard combat pipeline then applies body mitigation, armor, hit/miss/block/critical rules, combat text, aggro and kill credit. A 10 m/s direct hit supplies 98 raw damage; final HP loss depends on the combat rules. An empty Damage Element uses the kit's default element. Optional Knockback Speed uses the kit's movement-force system after a successful non-lethal hit; it defaults to zero.
+
+The current living driver is the instigator. Unoccupied cars, stationary overlaps, the car's own occupants, dead or invincible targets, and safe-area drivers/vehicles/targets are excluded. PvP, party, faction, guild and subchannel permissions go through `CanReceiveDamageFrom`; enabling vehicle hits does not enable PvP on a PvE map. The component never accepts client damage reports. Character HP and combat events use the kit's existing replication. Damage to characters is independent of whether the car itself can be attacked.
+
+Explicit movement-adapter teleports reset sweep history; large external position jumps are also rejected. Overlap relative velocity supports Unity CharacterController, NavMeshAgent and Rigidbody characters; custom movement implementations without these fall back to zero target velocity. Sweeps use the previous chassis orientation and skip large rotation jumps, so live tuning remains necessary for extreme angular speeds and latency.
+
 ## Editor tools and verification
 
 Under **Tools > MMORPG KIT > UVC Integration**:
 
 - **Create Demo Assets** builds the demo through Unity APIs when demo scenes do not already exist. It preserves existing authored demo scenes.
+- **Add Motorcycle Demo** adds and registers the motorcycle prefab, its single-seat controller mapping and one scene instance without duplicating existing entries.
 - **Create Player Entity Prefabs** creates demo variants of the source database's available player entity prefabs, assigns their matching UVC class assets, and registers them in the demo database. It also repairs this setup in an existing demo.
-- **Configure Demo Networking** disables unsynchronized crash deformation and configures the existing demo prefab with crash damage and 1,000 HP.
+- **Configure Demo Networking** disables unsynchronized crash deformation and configures the existing demo prefab with crash damage, character hit damage and 1,000 HP.
 - **Validate Integration** checks serialization, driver generations, input ordering/timeouts, prediction gating, telemetry, rotation/teleports, database registration, seats and scene identities. It also runs an isolated server/two-client replica test using the real adapter packet methods over temporary localhost UDP sockets: passenger rejection, focus reset, ownership handover, stale input, predicted teleports and disable. Run outside Play Mode.
 
 Validation also covers impact thresholds/caps, duplicate contacts, cooldown, invincibility, client rejection, condition replication, matching handling modifiers, repairs, the lethal-damage destruction request and condition reset on respawn. The destruction test intercepts the network-destruction boundary; it does not run the kit's full live despawn/respawn cycle.
+
+Character-hit validation exercises actual overlap/sweep queries and the combat dispatch with an editor-only character fixture, plus the kit's PvE/PvP and party rules. It checks attribution, duplicate colliders, safe areas, passengers, client rejection and lethal dispatch. The fixture substitutes damage calculation and received-damage callbacks, so full live armor calculations, kill rewards, knockback and network death events still need gameplay testing.
+
+The server/two-client replica validation also runs against the motorcycle prefab, checking its two-wheel packet layout and moving-part poses. This remains an edit-mode transport test; live motorcycle balance, handling, audio and riding under latency require gameplay verification.
 
 The entity creator also exposes the UVC movement factory for configured car prefabs. Add `UVCVehicleCrashDamage` and enable `VehicleEntity.canBeAttacked` to opt custom vehicles into crash damage.
 

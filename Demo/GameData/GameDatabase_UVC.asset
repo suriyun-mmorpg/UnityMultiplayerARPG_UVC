@@ -25,6 +25,7 @@ MonoBehaviour:
   vehicleEntities:
   - {fileID: 114414903903199864, guid: ff9787a13f67d204f9931790d6db8e1d, type: 3}
   - {fileID: 7266815396922044717, guid: d40c178512b2a0343affc1c825b27ca0, type: 3}
+  - {fileID: 3663548460905849217, guid: 70257791931509648ab03bcc12d0230c, type: 3}
   otherNetworkObjects: []
   addressablePlayerCharacterEntities: []
   addressableMonsterCharacterEntities: []

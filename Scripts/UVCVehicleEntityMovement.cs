@@ -26,6 +26,8 @@ namespace MultiplayerARPG
         [SerializeField, Min(0f)] private float _maxExtrapolation = 0.15f;
         [SerializeField, Min(0.1f)] private float _reconciliationSpeed = 3f;
         [SerializeField, Min(0.1f)] private float _predictionSnapDistance = 5f;
+        [Tooltip("Additional moving visual parts, ordered parent before child (e.g. motorcycle forks and handlebars).")]
+        [SerializeField] private Transform[] _additionalVisuals = System.Array.Empty<Transform>();
 
         public PG.CarController Car { get; private set; }
         public Rigidbody Body { get; private set; }
@@ -38,7 +40,8 @@ namespace MultiplayerARPG
         public bool IsPredicting => _predicting;
         public UVCVehicleTelemetry Telemetry => IsServer || _predicting ? UVCVehicleTelemetry.Capture(Car) : _telemetry;
         public float Acceleration => CrashDamage != null && CrashDamage.enabled && CrashDamage.EngineCondition <= 0f ? 0f : _simulationInput.throttle;
-        public float BrakeReverse => _simulationInput.brakeReverse;
+        public float BrakeReverse => Car is PG.BikeController && Car.CurrentGear < 0 &&
+            CrashDamage != null && CrashDamage.enabled && CrashDamage.EngineCondition <= 0f ? 0f : _simulationInput.brakeReverse;
         public float Horizontal => _simulationInput.steering;
         public float Pitch => _simulationInput.pitch;
         public bool HandBrake => _simulationInput.handbrake;
@@ -51,6 +54,8 @@ namespace MultiplayerARPG
         private WheelCollider[] _wheelColliders;
         private Vector3[] _wheelPositions;
         private Quaternion[] _wheelRotations;
+        private Vector3[] _visualPositions;
+        private Quaternion[] _visualRotations;
         private Vector3 _serverPosition;
         private Quaternion _serverRotation;
         private Vector3 _serverVelocity;
@@ -87,6 +92,8 @@ namespace MultiplayerARPG
             _wheelColliders = GetComponentsInChildren<WheelCollider>(true);
             _wheelPositions = new Vector3[_wheels.Length];
             _wheelRotations = new Quaternion[_wheels.Length];
+            _visualPositions = new Vector3[_additionalVisuals.Length];
+            _visualRotations = new Quaternion[_additionalVisuals.Length];
             // Vendor player/AI inputs must not compete with the network adapter.
             foreach (MonoBehaviour component in GetComponents<MonoBehaviour>())
             {
@@ -248,6 +255,18 @@ namespace MultiplayerARPG
             Car.ApplyUVCNetworkTelemetry(_telemetry, factor, true);
             Body.position = Vector3.Lerp(Body.position, _serverPosition, factor);
             Body.rotation = Quaternion.Slerp(Body.rotation, _serverRotation, factor);
+            ApplyRemoteVisuals();
+        }
+
+        private void ApplyRemoteVisuals()
+        {
+            // Parent fork poses must be applied before the wheel views they carry.
+            for (int i = 0; i < _additionalVisuals.Length; ++i)
+            {
+                if (_additionalVisuals[i] == null) continue;
+                _additionalVisuals[i].SetPositionAndRotation(transform.TransformPoint(_visualPositions[i]),
+                    transform.rotation * _visualRotations[i]);
+            }
             for (int i = 0; i < _wheels.Length; ++i)
             {
                 if (_wheels[i] == null || _wheels[i].WheelView == null)
@@ -310,6 +329,7 @@ namespace MultiplayerARPG
             bool hasDamage = CrashDamage != null && CrashDamage.enabled;
             writer.Put(hasDamage ? CrashDamage.EngineCondition : 1f);
             writer.Put((uint)MovementState);
+            writer.Put((ushort)_additionalVisuals.Length);
             writer.Put((ushort)_wheels.Length);
             for (int i = 0; i < _wheels.Length; ++i)
             {
@@ -318,6 +338,11 @@ namespace MultiplayerARPG
                 writer.PutVector3(view != null ? transform.InverseTransformPoint(view.position) : Vector3.zero);
                 writer.PutQuaternion(view != null ? Quaternion.Inverse(transform.rotation) * view.rotation : Quaternion.identity);
                 writer.Put(hasDamage ? CrashDamage.GetWheelCondition(i) : 1f);
+            }
+            foreach (Transform visual in _additionalVisuals)
+            {
+                writer.PutVector3(visual != null ? transform.InverseTransformPoint(visual.position) : Vector3.zero);
+                writer.PutQuaternion(visual != null ? Quaternion.Inverse(transform.rotation) * visual.rotation : Quaternion.identity);
             }
             return true;
         }
@@ -336,8 +361,9 @@ namespace MultiplayerARPG
             UVCVehicleTelemetry telemetry = UVCVehicleTelemetry.Read(reader);
             float engineCondition = reader.GetFloat();
             MovementState movementState = (MovementState)reader.GetUInt();
+            int visualCount = reader.GetUShort();
             int wheelCount = reader.GetUShort();
-            bool accept = !IsServer && peerTimestamp > _snapshotTimestamp && wheelCount == _wheels.Length;
+            bool accept = !IsServer && peerTimestamp > _snapshotTimestamp && wheelCount == _wheels.Length && visualCount == _additionalVisuals.Length;
             for (int i = 0; i < wheelCount; ++i)
             {
                 Vector3 wheelPosition = reader.GetVector3();
@@ -349,6 +375,14 @@ namespace MultiplayerARPG
                     _wheelRotations[i] = wheelRotation;
                     if (CrashDamage != null) CrashDamage.SetReplicatedWheelCondition(i, wheelCondition);
                 }
+            }
+            for (int i = 0; i < visualCount; ++i)
+            {
+                Vector3 visualPosition = reader.GetVector3();
+                Quaternion visualRotation = reader.GetQuaternion();
+                if (!accept) continue;
+                _visualPositions[i] = visualPosition;
+                _visualRotations[i] = visualRotation;
             }
             if (!accept)
                 return;
@@ -445,6 +479,7 @@ namespace MultiplayerARPG
                 return;
             Body.position = position;
             Body.rotation = rotation;
+            GetComponent<UVCVehicleHitDamage>()?.ResetSweepHistory();
             if (!stillMoveAfterTeleport)
             {
                 StopMove();

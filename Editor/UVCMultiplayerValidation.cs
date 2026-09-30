@@ -24,7 +24,7 @@ namespace MultiplayerARPG
             public BaseGameEntity driverA, driverB;
         }
 
-        public static void Validate()
+        public static void Validate(string prefabPath = null)
         {
             var previous = SceneManager.GetActiveScene();
             var scene = EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Additive);
@@ -32,10 +32,14 @@ namespace MultiplayerARPG
             {
                 using var network = new UVCValidationTransport();
                 SceneManager.SetActiveScene(scene);
-                var server = CreatePeer(true, -1, scene);
-                var clientA = CreatePeer(false, 10, scene);
-                var clientB = CreatePeer(false, 20, scene);
+                var server = CreatePeer(true, -1, scene, prefabPath);
+                var clientA = CreatePeer(false, 10, scene, prefabPath);
+                var clientB = CreatePeer(false, 20, scene, prefabPath);
                 Seat(server, 10); Seat(clientA, 10); Seat(clientB, 10);
+                var serverVisuals = (Transform[])Field(server.movement, "_additionalVisuals").GetValue(server.movement);
+                var remoteVisuals = (Transform[])Field(clientB.movement, "_additionalVisuals").GetValue(clientB.movement);
+                foreach (var visual in serverVisuals)
+                    visual.localRotation *= Quaternion.Euler(3f, 12f, 0f);
                 server.movement.Car.ApplyUVCNetworkTelemetry(new UVCVehicleTelemetry
                     { rpm = 4500, turbo = 0.6f, boostAmount = 8, gear = 2, engineOn = true, boosting = true }, 1f, false);
                 Snapshot(server, clientA, 100, network, 1);
@@ -45,6 +49,11 @@ namespace MultiplayerARPG
                 Check(clientA.movement.IsPredicting && !clientA.movement.Body.isKinematic, "Driver A should predict locally.");
                 Check(!clientB.movement.IsPredicting && clientB.movement.Body.isKinematic, "Passenger B must stay kinematic.");
                 Invoke(clientB.movement, "LateUpdate");
+                Invoke(clientB.movement, "ApplyRemoteVisuals");
+                for (int i = 0; i < serverVisuals.Length; ++i)
+                    Check(Quaternion.Angle(Quaternion.Inverse(server.movement.transform.rotation) * serverVisuals[i].rotation,
+                        Quaternion.Inverse(clientB.movement.transform.rotation) * remoteVisuals[i].rotation) < 0.01f,
+                        "Motorcycle fork and handlebar poses must replicate to observers.");
                 // Apply exactly once at full blend to verify the vendor audio inputs, independent of editor deltaTime.
                 clientB.movement.Car.ApplyUVCNetworkTelemetry(clientB.movement.Telemetry, 1f, false);
                 Check(clientB.movement.Car.EngineRPM == 4500 && clientB.movement.Car.CurrentGear == 2 &&
@@ -80,10 +89,13 @@ namespace MultiplayerARPG
                 Field(seatController, "_movement").SetValue(seatController, clientA.movement);
                 seatController.SetThrottle(1f);
                 seatController.SetBoost(true);
+                seatController.SetPitch(1f);
                 typeof(BaseVehiclePlayerController).GetMethod("OnApplicationFocus", BindingFlags.NonPublic | BindingFlags.Instance)
                     .Invoke(seatController, new object[] { false });
                 Check(((UVCVehicleInput)Field(seatController, "_mobileInput").GetValue(seatController)).throttle == 0f,
                     "Focus loss must clear held mobile controls.");
+                Check(((UVCVehicleInput)Field(seatController, "_mobileInput").GetValue(seatController)).pitch == 0f,
+                    "Focus loss must clear motorcycle pitch controls.");
                 Property(seatController, "PlayerController", null);
                 writer.Reset();
                 clientA.movement.WriteClientState(102, writer, out _);
@@ -191,14 +203,14 @@ namespace MultiplayerARPG
             typeof(UVCVehicleCrashDamage).GetMethod("QueueImpact", BindingFlags.NonPublic | BindingFlags.Instance)
                 .Invoke(damage, new object[] { speed, deltaVelocity, point });
 
-        private static Peer CreatePeer(bool server, long clientId, Scene scene)
+        private static Peer CreatePeer(bool server, long clientId, Scene scene, string prefabPath)
         {
             var peer = new Peer();
             peer.manager = new GameObject("UVC validation peer").AddComponent<LiteNetLibGameManager>();
             Property(peer.manager, "IsServer", server);
             Property(peer.manager, "IsClient", !server);
             Property(peer.manager, "ClientConnectionId", clientId);
-            var prefab = AssetDatabase.LoadAssetAtPath<GameObject>(UVCIntegrationDemoBuilder.Root + "/Demo/Prefabs/UVC_S34_Vehicle.prefab");
+            var prefab = AssetDatabase.LoadAssetAtPath<GameObject>(prefabPath ?? UVCIntegrationDemoBuilder.Root + "/Demo/Prefabs/UVC_S34_Vehicle.prefab");
             var go = (GameObject)PrefabUtility.InstantiatePrefab(prefab, scene);
             peer.vehicle = go.GetComponent<VehicleEntity>();
             peer.vehicle.CurrentHp = 1;
