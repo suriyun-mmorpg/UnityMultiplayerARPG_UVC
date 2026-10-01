@@ -16,8 +16,6 @@ namespace MultiplayerARPG
             name, SubChannelId, 0, FactionId, PartyId, GuildId, IsInSafeArea, this, null);
         public override bool CanReceiveDamageFrom(EntityInfo driver) => !BlockDamage && base.CanReceiveDamageFrom(driver) &&
             (TestMap == null || !TestMap.IsAlly(this, driver));
-        protected override DamageElementMinMaxFloatAmounts PrepareDamageAmountsForReceive(HitBoxPosition position,
-            DamageElementMinMaxFloatAmounts amounts) => amounts;
         protected override void ApplyReceiveDamage(HitBoxPosition position, Vector3 from, EntityInfo driver,
             DamageElementMinMaxFloatAmounts amounts, CharacterItem weapon, BaseSkill skill, int level, int seed,
             out CombatAmountType type, out int damage)
