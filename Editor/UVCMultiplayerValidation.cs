@@ -36,6 +36,8 @@ namespace MultiplayerARPG
                 var clientA = CreatePeer(false, 10, scene, prefabPath);
                 var clientB = CreatePeer(false, 20, scene, prefabPath);
                 Seat(server, 10); Seat(clientA, 10); Seat(clientB, 10);
+                ValidatePlatformReplication(server, clientB, network);
+                ValidateNotSecureRelay(server, clientB, network);
                 var serverVisuals = (Transform[])Field(server.movement, "_additionalVisuals").GetValue(server.movement);
                 var remoteVisuals = (Transform[])Field(clientB.movement, "_additionalVisuals").GetValue(clientB.movement);
                 foreach (var visual in serverVisuals)
@@ -48,6 +50,25 @@ namespace MultiplayerARPG
                 Invoke(clientB.movement, "RefreshSimulation");
                 Check(clientA.movement.IsPredicting && !clientA.movement.Body.isKinematic, "Driver A should predict locally.");
                 Check(!clientB.movement.IsPredicting && clientB.movement.Body.isKinematic, "Passenger B must stay kinematic.");
+                Check(clientB.movement.Body.interpolation == RigidbodyInterpolation.None,
+                    "Observers must not apply PhysX interpolation on top of network smoothing.");
+                Check(clientA.movement.Body.interpolation == (RigidbodyInterpolation)Field(clientA.movement, "_simulationInterpolation").GetValue(clientA.movement),
+                    "Prediction must restore the authored physics interpolation mode.");
+                // Exercise observer presentation with delayed packets and a long packet-loss gap.
+                Vector3 snapshotPosition = clientB.movement.Body.position;
+                Field(clientB.movement, "_serverVelocity").SetValue(clientB.movement, Vector3.forward * 20f);
+                Field(clientB.movement, "_snapshotTransitTime").SetValue(clientB.movement, 0.05f);
+                Field(clientB.movement, "_snapshotTime").SetValue(clientB.movement, Time.unscaledTime - 0.05f);
+                typeof(UVCVehicleEntityMovement).GetMethod("UpdateRemoteMovement", BindingFlags.NonPublic | BindingFlags.Instance)
+                    .Invoke(clientB.movement, new object[] { 1f });
+                Check(clientB.movement.Body.position.z > snapshotPosition.z + 1.5f,
+                    "Observers must account for snapshot age and transit time instead of following old positions.");
+                Field(clientB.movement, "_snapshotTime").SetValue(clientB.movement, Time.unscaledTime - 10f);
+                typeof(UVCVehicleEntityMovement).GetMethod("UpdateRemoteMovement", BindingFlags.NonPublic | BindingFlags.Instance)
+                    .Invoke(clientB.movement, new object[] { 1f });
+                Check(clientB.movement.Body.position.z <= snapshotPosition.z + 3.001f,
+                    "Packet loss must bound observer extrapolation to 150 milliseconds.");
+                Snapshot(server, clientB, 101, network, 2);
                 Invoke(clientB.movement, "LateUpdate");
                 Invoke(clientB.movement, "ApplyRemoteVisuals");
                 for (int i = 0; i < serverVisuals.Length; ++i)
@@ -197,6 +218,161 @@ namespace MultiplayerARPG
             server.vehicle.CurrentHp = 1000;
             probe.OnIdentityInitialize();
             Check(probe.EngineCondition == 1f && probe.WheelConditions[0] == 1f, "Respawn must clear old damage.");
+        }
+
+        private sealed class PlatformRiderMovement : IBuiltInEntityMovement3D
+        {
+            private readonly Transform _transform;
+            public PlatformRiderMovement(Transform transform) { _transform = transform; }
+            public bool isActiveAndEnabled => true;
+            public bool GroundCheck() => true;
+            public bool AirborneCheck() => false;
+            public void SetPosition(Vector3 position) => _transform.position = position;
+            public void Move(MovementState state, ExtraMovementState extra, Vector3 motion, float deltaTime) => _transform.position += motion;
+            public void RotateY(float yAngle) => _transform.rotation = Quaternion.Euler(0f, yAngle, 0f);
+            public void OnJumpForceApplied(float verticalVelocity) { }
+            public Bounds GetMovementBounds() => new Bounds(_transform.position, Vector3.one);
+            public Vector3 GetSnapToGroundMotion(Vector3 motion, Vector3 platformMotion, Vector3 forceMotion) => Vector3.zero;
+        }
+
+        private static void ValidatePlatformReplication(Peer server, Peer observer, UVCValidationTransport network)
+        {
+            // Use actual character movement serialization/interpolation against differently placed vehicle replicas.
+            foreach (Peer peer in new[] { server, observer })
+            {
+                Field(peer.manager, "_logicUpdater").SetValue(peer.manager, new LogicUpdater(0.05));
+                if (peer.manager.Assets == null)
+                    Property(peer.manager, "Assets", peer.manager.GetComponent<LiteNetLibAssets>());
+                ((Dictionary<uint, LiteNetLibIdentity>)Field(peer.manager.Assets, "SpawnedObjects").GetValue(peer.manager.Assets))
+                    [peer.vehicle.ObjectId] = peer.vehicle.Identity;
+                Property(peer.vehicle, "Movement", peer.movement);
+                Property(peer.driverA, "Movement", peer.movement);
+            }
+            var receiver = new BuiltInEntityMovementFunctions3D(observer.driverA, null,
+                new PlatformRiderMovement(observer.driverA.transform));
+            var relay = new BuiltInEntityMovementFunctions3D(server.driverA, null,
+                new PlatformRiderMovement(server.driverA.transform));
+            relay.EntityStart();
+            Field(relay, "_isServerWaitingTeleportConfirm").SetValue(relay, false);
+            Vector3 point = server.vehicle.transform.InverseTransformPoint(server.movement.GetMovementBounds().center);
+            var state = new EntityMovementPlatformState { objectId = server.vehicle.ObjectId, localPosition = point };
+            var writer = new NetDataWriter();
+            // Owning character's world position is deliberately far from the observer car.
+            writer.PutPackedUInt((uint)MovementState.IsGrounded);
+            writer.Put((byte)ExtraMovementState.None);
+            writer.PutVector3(new Vector3(100f, 10f, 100f));
+            writer.PutPackedInt(0);
+            state.Write(writer);
+            var reader = new NetDataReader(network.Transfer(1, 0, writer.CopyData()));
+            relay.ReadClientStateAtServer(200, reader);
+            Check(reader.AvailableBytes == 0, "Server consumes platform data from owner packets.");
+            writer.Reset();
+            Check(relay.WriteServerState(200, writer, out _), "Server relays the rider snapshot.");
+            reader = new NetDataReader(network.Transfer(0, 2, writer.CopyData()));
+            receiver.ReadServerStateAtClient(200, reader);
+            Check(reader.AvailableBytes == 0, "Observer consumes complete rider packet.");
+            observer.movement.Body.position += new Vector3(8f, 0f, -12f);
+            observer.movement.Body.rotation = Quaternion.Euler(0f, 70f, 0f);
+            receiver.UpdateInterpolate(1f);
+            Check(Vector3.Distance(observer.driverA.transform.position, observer.vehicle.transform.TransformPoint(point)) < 0.001f,
+                "A remote rider stays on the displayed vehicle despite world-position delay and rotation.");
+            // No new rider packets: a moving vehicle must still carry the replica.
+            observer.movement.Body.position += Vector3.forward * 5f;
+            receiver.UpdateInterpolate(0.02f);
+            Check(Vector3.Distance(observer.driverA.transform.position, observer.vehicle.transform.TransformPoint(point)) < 0.001f,
+                "Rider follows vehicle between character snapshots.");
+            // A stale detach cannot replace the latest attachment.
+            writer.Reset();
+            writer.PutPackedUInt((uint)MovementState.None); writer.Put((byte)ExtraMovementState.None);
+            writer.PutVector3(Vector3.zero); writer.PutPackedInt(0);
+            writer.PutList(new List<EntityMovementForceApplier>());
+            default(EntityMovementPlatformState).Write(writer);
+            receiver.ReadServerStateAtClient(199, new NetDataReader(writer.CopyData()));
+            receiver.UpdateInterpolate(1f);
+            Check(Vector3.Distance(observer.driverA.transform.position, observer.vehicle.transform.TransformPoint(point)) < 0.001f,
+                "Out-of-order detach must not remove support.");
+            receiver.ReadServerStateAtClient(201, new NetDataReader(writer.CopyData()));
+            receiver.UpdateInterpolate(1f);
+            observer.movement.Body.position += Vector3.forward * 5f;
+            receiver.UpdateInterpolate(1f);
+            Check(observer.driverA.transform.position == Vector3.zero, "A current detach returns to world interpolation.");
+            state.localPosition = Vector3.one * 10000f;
+            Check(!state.TryResolve(observer.manager, out _, true), "Reject out-of-bounds support claims.");
+            state.localPosition = new Vector3(float.NaN, 0f, 0f);
+            Check(!state.TryResolve(observer.manager, out _), "Reject nonfinite support claims.");
+            // Network sends may happen after the vehicle advances, but before its rider's next Update.
+            // Sample the relative pose when movement finishes, rather than against that newer vehicle pose.
+            observer.driverA.transform.position = observer.vehicle.transform.TransformPoint(point);
+            receiver.OnControllerColliderHit(observer.driverA.transform.position, Vector3.up, observer.vehicle.transform, 0.7f);
+            receiver.AfterMovementUpdate(0.02f);
+            observer.movement.Body.position += Vector3.right * 4f;
+            observer.movement.Body.rotation *= Quaternion.Euler(0f, 30f, 0f);
+            var captured = (EntityMovementPlatformState)typeof(BuiltInEntityMovementFunctions3D)
+                .GetMethod("GetPlatformState", BindingFlags.NonPublic | BindingFlags.Instance).Invoke(receiver, null);
+            Check(captured.objectId == observer.vehicle.ObjectId && Vector3.Distance(captured.localPosition, point) < 0.001f,
+                "Vehicle movement between character update and packet write must not change the rider's local offset.");
+            receiver.ResetPlatform();
+            captured = (EntityMovementPlatformState)typeof(BuiltInEntityMovementFunctions3D)
+                .GetMethod("GetPlatformState", BindingFlags.NonPublic | BindingFlags.Instance).Invoke(receiver, null);
+            Check(captured.objectId == 0, "Resetting support clears the captured local pose.");
+            observer.movement.Body.position = server.movement.Body.position;
+            observer.movement.Body.rotation = server.movement.Body.rotation;
+        }
+
+        private static void AllowValidationMovement(BaseGameEntity entity, ref bool allowed) => allowed = true;
+
+        private static void ValidateNotSecureRelay(Peer server, Peer observer, UVCValidationTransport network)
+        {
+            server.driverA.onCanMoveValidated += AllowValidationMovement;
+            try
+            {
+                foreach (bool host in new[] { true, false })
+                {
+                    Property(server.manager, "IsClient", host);
+                    Property(server.manager, "ClientConnectionId", host ? 30L : -1L);
+                    server.driverA.transform.position = Vector3.zero;
+                    var relay = new BuiltInEntityMovementFunctions3D(server.driverA, null,
+                        new PlatformRiderMovement(server.driverA.transform));
+                    relay.EntityStart();
+                    var receiver = new BuiltInEntityMovementFunctions3D(observer.driverA, null,
+                        new PlatformRiderMovement(observer.driverA.transform));
+                    foreach (Vector3 target in new[] { Vector3.right * 2f, new Vector3(4f, -3f, 1f) })
+                    {
+                        long timestamp = target.x == 2f ? 300 : 350;
+                        var input = new NetDataWriter();
+                        input.PutPackedUInt((uint)MovementState.None); input.Put((byte)ExtraMovementState.None);
+                        input.PutVector3(target); input.PutPackedInt(EntityMovementFunctions.GetCompressedAngle(75f));
+                        default(EntityMovementPlatformState).Write(input);
+                        relay.ReadClientStateAtServer(timestamp, new NetDataReader(network.Transfer(1, 0, input.CopyData())));
+                        relay.UpdateInterpolate(0.01f); // Send while the host is only part way through presentation smoothing.
+                        Vector3 presentation = server.driverA.transform.position;
+                        var output = new NetDataWriter();
+                        Check(relay.WriteServerState(timestamp, output, out _), "Remote NotSecure snapshot exists.");
+                        var payload = network.Transfer(0, 2, output.CopyData());
+                        var read = new NetDataReader(payload);
+                        read.ClientReadSyncTransformMessage3D(out _, out _, out Vector3 received, out float yaw, out _);
+                        var support = EntityMovementPlatformState.Read(read);
+                        Check(Vector3.Distance(received, target) < 0.001f,
+                            "NotSecure relay must transmit the accepted owner position, not the server's smoothed presentation (host=" + host + ").");
+                        Check(Mathf.Abs(Mathf.DeltaAngle(yaw, 75f)) < 1f, "Relay preserves accepted owner rotation.");
+                        Check(support.objectId == 0 && read.AvailableBytes == 0, "World snapshots retain the existing packet layout.");
+                        receiver.ReadServerStateAtClient(timestamp, new NetDataReader(payload));
+                        receiver.UpdateInterpolate(1f);
+                        Check(Vector3.Distance(observer.driverA.transform.position, target) < 0.001f,
+                            "Other clients converge to the owner pose, including falling after leaving a vehicle.");
+                        if (host)
+                            Check(Vector3.Distance(presentation, target) > 0.01f, "Test must exercise a host pose still being smoothed.");
+                        else
+                            Check(Vector3.Distance(presentation, target) < 0.001f, "Dedicated server must not rewind accepted positions through presentation smoothing.");
+                    }
+                }
+            }
+            finally
+            {
+                server.driverA.onCanMoveValidated -= AllowValidationMovement;
+                Property(server.manager, "IsClient", false);
+                Property(server.manager, "ClientConnectionId", -1L);
+            }
         }
 
         private static void QueueCrash(UVCVehicleCrashDamage damage, float speed, float deltaVelocity, Vector3 point) =>

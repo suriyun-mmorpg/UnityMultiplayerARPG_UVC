@@ -92,3 +92,13 @@ Editor compilation and integration validation run in Unity 2022.3.62f3. The repl
 ## Layout
 
 `Scripts` contains runtime code; `Editor` contains the factory, builder and validation code; `Demo/Scenes`, `Demo/Prefabs` and `Demo/GameData` contain the sample assets.
+
+### Characters standing on vehicles
+
+The built-in `CharacterControllerEntityMovement` now sends the supporting vehicle ID and a vehicle-local feet position in its movement snapshots. Observers interpolate the character relative to their displayed vehicle, so independently delayed car and character packets do not slide a standing character across the roof. Jumping, leaving contact, and teleporting clear support. Static platforms still use ordinary world-position snapshots.
+
+This requires the accompanying Core changes. **Rebuild the server and every client together:** the built-in character movement packet format includes new platform data. Previously built executables use the old format. Vehicle Samples and UVC both advance observer chassis poses before character movement and use bounded snapshot extrapolation without additional Rigidbody interpolation.
+
+Regression checks cover owner-to-server-to-observer character packets, moving/rotating observer vehicles, packet gaps, stale detach packets, and returning to world interpolation. These are editor regression tests, not a substitute for a two-client gameplay test.
+
+For `NotSecure` character movement, the server relays the latest accepted owner pose rather than its interpolated display pose. Hosts smooth only their local presentation; dedicated servers apply accepted positions without display interpolation. Vehicle-relative offsets are captured at the end of character movement, so a vehicle update between movement and packet serialization cannot change the sent offset. These corrections do not add fields to the platform-aware packet format described above.

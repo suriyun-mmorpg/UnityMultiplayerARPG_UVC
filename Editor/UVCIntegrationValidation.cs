@@ -1,5 +1,6 @@
 using System;
 using System.Linq;
+using System.IO;
 using System.Reflection;
 using LiteNetLib.Utils;
 using LiteNetLibManager;
@@ -10,13 +11,28 @@ using Object = UnityEngine.Object;
 
 namespace MultiplayerARPG
 {
+    [InitializeOnLoad]
     public static class UVCIntegrationValidation
     {
+        static UVCIntegrationValidation() { EditorApplication.delayCall += ProcessRequest; }
+
+        private static void ProcessRequest()
+        {
+            const string request = "Temp/UVCIntegration.Validate.request";
+            if (!File.Exists(request)) return;
+            if (EditorApplication.isCompiling || EditorApplication.isUpdating || EditorApplication.isPlayingOrWillChangePlaymode)
+            { EditorApplication.delayCall += ProcessRequest; return; }
+            File.Delete(request);
+            try { Validate(); File.WriteAllText("Temp/UVCIntegration.Validate.result", "SUCCESS"); }
+            catch (Exception ex) { File.WriteAllText("Temp/UVCIntegration.Validate.result", ex.ToString()); Debug.LogException(ex); }
+        }
+
         [MenuItem("Tools/MMORPG KIT/UVC Integration/Validate Integration")]
         public static void Validate()
         {
             if (EditorApplication.isPlayingOrWillChangePlaymode)
                 throw new InvalidOperationException("Run validation outside Play Mode.");
+            ValidatePlatforms();
             ValidateInput();
             ValidateControlSessions();
             ValidateCrashDamageModel();
@@ -28,6 +44,42 @@ namespace MultiplayerARPG
             if (AssetDatabase.LoadAssetAtPath<GameObject>(UVCMotorcycleDemoBuilder.PrefabPath) != null)
                 UVCMultiplayerValidation.Validate(UVCMotorcycleDemoBuilder.PrefabPath);
             Debug.Log("UVC validation passed: input, ownership/timeout, prediction, telemetry, snapshots, multiplayer routing, crash damage, character hit damage, combat permissions, demo registration and scene identities.");
+        }
+
+        private static void ValidatePlatforms()
+        {
+            var go = new GameObject("Platform contact regression") { hideFlags = HideFlags.HideAndDontSave };
+            try
+            {
+                var support = go.transform;
+                var platform = new EntityMovementPlatform();
+                platform.RecordContact(Vector3.right, Vector3.up, support, 0.7f);
+                support.position = Vector3.forward * 2f;
+                Check((platform.ConsumeVelocity(true, 0.5f) - Vector3.forward * 4f).sqrMagnitude < 0.0001f,
+                    "A grounded rider inherits platform translation.");
+                support.position += Vector3.forward;
+                Check(platform.ConsumeVelocity(true, 0.5f) == Vector3.zero,
+                    "A missed contact must detach instead of dragging the character indefinitely.");
+                support.SetPositionAndRotation(Vector3.zero, Quaternion.identity);
+                platform.RecordContact(Vector3.right, Vector3.up, support, 0.7f);
+                platform.RecordContact(Vector3.zero, Vector3.right, support, 0.7f);
+                support.rotation = Quaternion.Euler(0f, 90f, 0f);
+                Check((platform.ConsumeVelocity(true, 1f) - (Vector3.back - Vector3.right)).sqrMagnitude < 0.0001f,
+                    "Rotation carries the support point; a later wall contact cannot erase the floor.");
+                platform.RecordContact(Vector3.zero, Vector3.right, support, 0.7f);
+                support.position += Vector3.up;
+                Check(platform.ConsumeVelocity(true, 1f) == Vector3.zero, "Car side contacts must never attach riders.");
+                platform.RecordContact(support.position, Vector3.up, support, 0.7f);
+                support.position += Vector3.forward;
+                Check(platform.ConsumeVelocity(false, 1f) == Vector3.zero, "Jumping or airborne riders detach.");
+                platform.RecordContact(support.position, Vector3.up, support, 0.7f);
+                platform.Reset();
+                support.position += Vector3.forward * 100f;
+                Check(platform.ConsumeVelocity(true, 1f) == Vector3.zero, "Teleport/ownership resets discard old support.");
+                platform.RecordContact(support.position, Vector3.up, support, 0.7f);
+                Check(platform.ConsumeVelocity(true, 0f) == Vector3.zero, "Paused movement cannot divide by zero.");
+            }
+            finally { Object.DestroyImmediate(go); }
         }
 
         private static void ValidateControlSessions()

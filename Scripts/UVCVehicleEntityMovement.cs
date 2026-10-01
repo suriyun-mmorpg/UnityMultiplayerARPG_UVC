@@ -65,6 +65,7 @@ namespace MultiplayerARPG
         private float _snapshotTransitTime;
         private bool _predicting;
         private bool _simulating;
+        private RigidbodyInterpolation _simulationInterpolation;
         private bool _serverSimulationEnabled;
         private long _snapshotOwnerId = long.MinValue;
         private uint _snapshotDriverId;
@@ -87,6 +88,7 @@ namespace MultiplayerARPG
         {
             Car = GetComponent<PG.CarController>();
             Body = GetComponent<Rigidbody>();
+            _simulationInterpolation = Body.interpolation;
             CrashDamage = GetComponent<UVCVehicleCrashDamage>();
             _wheels = Car.Wheels;
             _wheelColliders = GetComponentsInChildren<WheelCollider>(true);
@@ -202,6 +204,8 @@ namespace MultiplayerARPG
                 Body.angularVelocity = Vector3.zero;
             }
             Body.isKinematic = !simulate;
+            // Remote poses already have network smoothing; PhysX interpolation would present a different support pose.
+            Body.interpolation = simulate ? _simulationInterpolation : RigidbodyInterpolation.None;
             Car.IsLocalVehicle = simulate;
             Car.enabled = simulate;
             foreach (PG.Wheel wheel in _wheels)
@@ -244,18 +248,35 @@ namespace MultiplayerARPG
                 Body.AddForce(forceVelocity * Time.fixedDeltaTime, ForceMode.VelocityChange);
         }
 
-        private void LateUpdate()
+        private void Update()
         {
             if (!_initialized || IsServer || !_hasSnapshot)
                 return;
             RefreshSimulation();
             if (_predicting)
                 return;
-            float factor = 1f - Mathf.Exp(-_interpolationSpeed * Time.deltaTime);
+            UpdateRemoteMovement(Time.deltaTime);
+        }
+
+        private void UpdateRemoteMovement(float deltaTime)
+        {
+            float factor = 1f - Mathf.Exp(-_interpolationSpeed * deltaTime);
             Car.ApplyUVCNetworkTelemetry(_telemetry, factor, true);
-            Body.position = Vector3.Lerp(Body.position, _serverPosition, factor);
-            Body.rotation = Quaternion.Slerp(Body.rotation, _serverRotation, factor);
-            ApplyRemoteVisuals();
+            // Advance the chassis before character movement so supporting contacts use this frame's pose.
+            // Match the driver's bounded server-time estimate instead of chasing an old packet position.
+            float lead = _serverSimulationEnabled
+                ? UVCVehiclePrediction.ExtrapolationTime(Time.unscaledTime - _snapshotTime + _snapshotTransitTime, _maxExtrapolation)
+                : 0f;
+            Vector3 target = _serverPosition + _serverVelocity * lead;
+            Quaternion rotation = UVCVehiclePrediction.ExtrapolateRotation(_serverRotation, _serverAngularVelocity, lead);
+            Body.position = Vector3.Lerp(Body.position, target, factor);
+            Body.rotation = Quaternion.Slerp(Body.rotation, rotation, factor);
+        }
+
+        private void LateUpdate()
+        {
+            if (_initialized && !IsServer && _hasSnapshot && !_predicting)
+                ApplyRemoteVisuals();
         }
 
         private void ApplyRemoteVisuals()
