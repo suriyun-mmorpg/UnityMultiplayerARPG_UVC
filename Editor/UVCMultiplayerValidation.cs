@@ -35,6 +35,7 @@ namespace MultiplayerARPG
                 var server = CreatePeer(true, -1, scene, prefabPath);
                 var clientA = CreatePeer(false, 10, scene, prefabPath);
                 var clientB = CreatePeer(false, 20, scene, prefabPath);
+                ValidateRemoteCharacterCollider(clientB);
                 Seat(server, 10); Seat(clientA, 10); Seat(clientB, 10);
                 ValidatePlatformReplication(server, clientB, network);
                 ValidateNotSecureRelay(server, clientB, network);
@@ -378,6 +379,64 @@ namespace MultiplayerARPG
         private static void QueueCrash(UVCVehicleCrashDamage damage, float speed, float deltaVelocity, Vector3 point) =>
             typeof(UVCVehicleCrashDamage).GetMethod("QueueImpact", BindingFlags.NonPublic | BindingFlags.Instance)
                 .Invoke(damage, new object[] { speed, deltaVelocity, point });
+
+        private static void ValidateRemoteCharacterCollider(Peer observer)
+        {
+            var go = new GameObject("Remote character collider regression");
+            try
+            {
+                var entity = go.AddComponent<VehicleEntity>();
+                Identity(entity.Identity, observer.manager, 300, 10);
+                var movement = go.AddComponent<CharacterControllerEntityMovement>();
+                Invoke(movement, "Awake");
+                movement.OnSetOwnerClient(false);
+                Check(!movement.Functions.CanSimulateMovement(), "Remote character must not gain movement authority.");
+                Check(!movement.CacheCharacterController.enabled, "Remote character controller must remain disabled.");
+                var obstacle = new GameObject("Vehicle replica collision regression");
+                try
+                {
+                    var body = obstacle.AddComponent<Rigidbody>();
+                    body.isKinematic = true;
+                    var chassis = obstacle.AddComponent<BoxCollider>();
+                    chassis.center = Vector3.up;
+                    chassis.size = new Vector3(2f, 1f, 4f);
+                    movement.SetPosition(Vector3.right * 4f);
+                    movement.CacheCharacterController.center = Vector3.up;
+                    movement.CacheCapsuleCollider.center = Vector3.up;
+                    movement.CacheCapsuleCollider.radius = 0.5f;
+                    movement.CacheCapsuleCollider.height = 2f;
+                    Physics.SyncTransforms();
+                    var collision = new UVCVehicleCharacterCollision(body);
+                    Vector3 target = Vector3.right * 8f;
+                    Vector3 corrected = collision.Constrain(target, Quaternion.identity);
+                    Check(corrected.x > 2f && corrected.x < 2.51f,
+                        "A remote trigger capsule must stop the car without enabling its controller. Position=" + corrected);
+                    Check(!movement.CacheCharacterController.enabled && go.transform.position == Vector3.right * 4f,
+                        "Vehicle queries must not change character position or controller state.");
+                    Physics.IgnoreCollision(chassis, movement.CacheCapsuleCollider, true);
+                    Check(collision.Constrain(target, Quaternion.identity) == target, "Ignored replica capsules do not block cars.");
+                    Physics.IgnoreCollision(chassis, movement.CacheCapsuleCollider, false);
+                    body.isKinematic = false;
+                    body.useGravity = false;
+                    body.velocity = Vector3.right * 20f;
+                    collision.ConstrainSimulation(0.2f);
+                    Check(body.velocity.x > 0f && body.velocity.x < 13f,
+                        "Server and predicted car velocity must respect remote trigger capsules.");
+                    movement.enabled = false;
+                    Check(collision.Constrain(target, Quaternion.identity) == target, "Seated or disabled movement must not block cars.");
+                    movement.enabled = true;
+                }
+                finally { Object.DestroyImmediate(obstacle); }
+                movement.SetPosition(new Vector3(100f, 2f, 100f));
+                movement.Move(MovementState.None, ExtraMovementState.None, Vector3.right, 0.02f);
+                Check(go.transform.position == new Vector3(101f, 2f, 100f) && !movement.CacheCharacterController.enabled,
+                    "Replica positioning must leave the controller disabled.");
+                movement.enabled = false;
+                Invoke(movement, "OnDisable");
+                Check(!movement.CacheCharacterController.enabled, "Disabling movement for a seat must disable its collider.");
+            }
+            finally { Object.DestroyImmediate(go); }
+        }
 
         private static Peer CreatePeer(bool server, long clientId, Scene scene, string prefabPath)
         {

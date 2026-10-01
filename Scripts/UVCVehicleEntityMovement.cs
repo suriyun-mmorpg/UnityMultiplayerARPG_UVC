@@ -65,6 +65,7 @@ namespace MultiplayerARPG
         private float _snapshotTransitTime;
         private bool _predicting;
         private bool _simulating;
+        private UVCVehicleCharacterCollision _characterCollision;
         private RigidbodyInterpolation _simulationInterpolation;
         private bool _serverSimulationEnabled;
         private long _snapshotOwnerId = long.MinValue;
@@ -88,6 +89,7 @@ namespace MultiplayerARPG
         {
             Car = GetComponent<PG.CarController>();
             Body = GetComponent<Rigidbody>();
+            _characterCollision = new UVCVehicleCharacterCollision(Body);
             _simulationInterpolation = Body.interpolation;
             CrashDamage = GetComponent<UVCVehicleCrashDamage>();
             _wheels = Car.Wheels;
@@ -246,6 +248,7 @@ namespace MultiplayerARPG
                 Body.velocity = replacement.Velocity + forceVelocity;
             else if (forceVelocity.sqrMagnitude > 0f)
                 Body.AddForce(forceVelocity * Time.fixedDeltaTime, ForceMode.VelocityChange);
+            _characterCollision.ConstrainSimulation(Time.fixedDeltaTime);
         }
 
         private void Update()
@@ -269,8 +272,9 @@ namespace MultiplayerARPG
                 : 0f;
             Vector3 target = _serverPosition + _serverVelocity * lead;
             Quaternion rotation = UVCVehiclePrediction.ExtrapolateRotation(_serverRotation, _serverAngularVelocity, lead);
-            Body.position = Vector3.Lerp(Body.position, target, factor);
-            Body.rotation = Quaternion.Slerp(Body.rotation, rotation, factor);
+            Quaternion nextRotation = Quaternion.Slerp(Body.rotation, rotation, factor);
+            Body.position = _characterCollision.Constrain(Vector3.Lerp(Body.position, target, factor), nextRotation);
+            Body.rotation = nextRotation;
         }
 
         private void LateUpdate()
@@ -460,8 +464,9 @@ namespace MultiplayerARPG
             float blend = 1f - Mathf.Exp(-_reconciliationSpeed * Time.fixedDeltaTime);
             if (Vector3.Distance(Body.position, target) > _predictionSnapDistance)
                 blend = 1f;
-            Body.position = Vector3.Lerp(Body.position, target, blend);
-            Body.rotation = Quaternion.Slerp(Body.rotation, rotation, blend);
+            Quaternion nextRotation = Quaternion.Slerp(Body.rotation, rotation, blend);
+            Body.position = _characterCollision.Constrain(Vector3.Lerp(Body.position, target, blend), nextRotation);
+            Body.rotation = nextRotation;
             Body.velocity = Vector3.Lerp(Body.velocity, _serverVelocity, blend);
             Body.angularVelocity = Vector3.Lerp(Body.angularVelocity, _serverAngularVelocity, blend);
             // Keep local engine response, but the server owns consumable boost fuel.

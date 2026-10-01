@@ -32,6 +32,7 @@ namespace MultiplayerARPG
         {
             if (EditorApplication.isPlayingOrWillChangePlaymode)
                 throw new InvalidOperationException("Run validation outside Play Mode.");
+            ValidateCharacterCollision();
             ValidatePlatforms();
             ValidateInput();
             ValidateControlSessions();
@@ -44,6 +45,73 @@ namespace MultiplayerARPG
             if (AssetDatabase.LoadAssetAtPath<GameObject>(UVCMotorcycleDemoBuilder.PrefabPath) != null)
                 UVCMultiplayerValidation.Validate(UVCMotorcycleDemoBuilder.PrefabPath);
             Debug.Log("UVC validation passed: input, ownership/timeout, prediction, telemetry, snapshots, multiplayer routing, crash damage, character hit damage, combat permissions, demo registration and scene identities.");
+        }
+
+        private static void ValidateCharacterCollision()
+        {
+            var scene = EditorSceneManager.NewPreviewScene();
+            try
+            {
+                var car = new GameObject("Network chassis collision regression");
+                UnityEngine.SceneManagement.SceneManager.MoveGameObjectToScene(car, scene);
+                var body = car.AddComponent<Rigidbody>();
+                body.isKinematic = true;
+                var shape = new GameObject("Compound chassis");
+                shape.transform.SetParent(car.transform, false);
+                shape.transform.localPosition = Vector3.up;
+                var box = shape.AddComponent<BoxCollider>();
+                box.size = new Vector3(2f, 1f, 4f);
+                var character = new GameObject("Stationary character");
+                UnityEngine.SceneManagement.SceneManager.MoveGameObjectToScene(character, scene);
+                character.transform.position = Vector3.right * 4f;
+                var controller = character.AddComponent<CharacterController>();
+                controller.center = Vector3.up;
+                controller.height = 2f;
+                controller.radius = 0.5f;
+                Physics.SyncTransforms();
+                var collision = new UVCVehicleCharacterCollision(body);
+                Vector3 corrected = collision.Constrain(Vector3.right * 8f, Quaternion.identity);
+                Check(corrected.x > 2f && corrected.x <= 2.5f + controller.skinWidth + controller.contactOffset + 0.01f,
+                    "A remote chassis must stop before crossing a standing character. Position=" + corrected);
+                Check(character.transform.position == Vector3.right * 4f,
+                    "Vehicle correction must never move the stationary character.");
+                body.position = Vector3.right * 3.5f;
+                Check(Physics.ComputePenetration(box, body.position + Vector3.up, Quaternion.identity,
+                    controller, character.transform.position, character.transform.rotation, out _, out float initialDepth) && initialDepth > 0.5f,
+                    "The collision regression must start with a penetrating chassis.");
+                corrected = collision.Constrain(body.position, Quaternion.identity);
+                Check(!Physics.ComputePenetration(box, corrected + Vector3.up, Quaternion.identity,
+                    controller, character.transform.position, character.transform.rotation, out _, out float depth) || depth < 0.001f,
+                    "Existing overlap must be resolved using the compound chassis physics pose.");
+                body.position = corrected;
+                Check(Vector3.Distance(collision.Constrain(corrected, Quaternion.identity), corrected) < 0.001f,
+                    "An already separated car must remain stable.");
+                Physics.IgnoreCollision(box, controller, true);
+                Check(collision.Constrain(Vector3.right * 4f, Quaternion.identity) == Vector3.right * 4f,
+                    "Ignored passenger collision pairs must remain ignored.");
+                Physics.IgnoreCollision(box, controller, false);
+                controller.enabled = false;
+                Check(collision.Constrain(Vector3.right * 4f, Quaternion.identity) == Vector3.right * 4f,
+                    "Disabled or seated character colliders must not block a car.");
+                body.position = Vector3.zero;
+                character.transform.position = new Vector3(0f, 1.49f, 0f);
+                controller.enabled = true;
+                Physics.SyncTransforms();
+                Vector3 roofMotion = Vector3.forward * 0.1f;
+                Check(Vector3.Distance(collision.Constrain(roofMotion, Quaternion.identity), roofMotion) < 0.001f,
+                    "A character standing on the roof must not pin or push the chassis into the ground.");
+                controller.enabled = false;
+                character.transform.position = Vector3.right * 2f;
+                controller.enabled = true;
+                Physics.SyncTransforms();
+                Quaternion turn = Quaternion.Euler(0f, 90f, 0f);
+                corrected = collision.Constrain(Vector3.zero, turn);
+                Check(corrected.x < -0.1f && (!Physics.ComputePenetration(box, corrected + Vector3.up, turn,
+                    controller, character.transform.position, character.transform.rotation, out _, out depth) || depth < 0.001f),
+                    "Rotating a compound chassis must not embed it in a standing character.");
+                Check(body.isKinematic, "Observer collision constraints must preserve kinematic replication.");
+            }
+            finally { EditorSceneManager.ClosePreviewScene(scene); }
         }
 
         private static void ValidatePlatforms()
