@@ -60,7 +60,8 @@ namespace MultiplayerARPG
                         break;
                     }
                 }
-                target = _body.position + motion / distance * allowed;
+                if (allowed < distance)
+                    target = _body.position + motion / distance * allowed;
             }
 
             // Sweeps do not resolve initial penetration or the change in chassis orientation.
@@ -105,13 +106,19 @@ namespace MultiplayerARPG
         public void ConstrainSimulation(float deltaTime)
         {
             if (_body.isKinematic || deltaTime <= 0f) return;
-            Vector3 position = Constrain(_body.position, _body.rotation, true);
-            _body.position = position;
+            Vector3 currentPosition = _body.position;
+            Vector3 position = Constrain(currentPosition, _body.rotation, true);
+            // Leave an unobstructed body to UVC/PhysX; even an unchanged pose write wakes it.
+            if ((position - currentPosition).sqrMagnitude > 0f)
+                _body.position = position;
             Vector3 travel = _body.velocity * deltaTime;
-            Vector3 next = Constrain(position + travel, _body.rotation, true);
+            Vector3 target = position + travel;
+            Vector3 correction = Constrain(target, _body.rotation, true) - target;
             // The replica capsule is a trigger, so PhysX cannot stop the car against it.
             // Limit car velocity only; never move or enable the replicated character controller.
-            _body.velocity += (next - position - travel) / deltaTime;
+            // Subtract the actual target to avoid rounding world coordinates into velocity changes.
+            if (correction.sqrMagnitude > 0f)
+                _body.velocity += correction / deltaTime;
         }
     }
 }

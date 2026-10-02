@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 using LiteNetLib.Utils;
 using LiteNetLibManager;
@@ -12,7 +13,7 @@ using Object = UnityEngine.Object;
 namespace MultiplayerARPG
 {
     /// <summary>Isolated edit-mode server + two client replicas using real adapter packet methods.
-    /// Packets cross localhost UDP sockets; this does not simulate live gameplay/PhysX.</summary>
+    /// Packets cross localhost UDP sockets; wheel physics use isolated fixtures, not live gameplay.</summary>
     public static class UVCMultiplayerValidation
     {
         private sealed class Peer
@@ -26,6 +27,7 @@ namespace MultiplayerARPG
 
         public static void Validate(string prefabPath = null)
         {
+            ValidateWheelSubsteps();
             var previous = SceneManager.GetActiveScene();
             var scene = EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Additive);
             try
@@ -163,6 +165,83 @@ namespace MultiplayerARPG
                 if (previous.IsValid() && previous.isLoaded) SceneManager.SetActiveScene(previous);
                 EditorSceneManager.CloseScene(scene, true);
             }
+        }
+
+        public static void ValidateWheelSubsteps()
+        {
+            // Compare native wheel physics with the adapter's initial activation and a later handover.
+            // Substeps have no getter, so check the suspension trajectory instead of inspecting configuration.
+            float[] native = SimulateSuspension(0);
+            for (int activation = 1; activation <= 2; ++activation)
+            {
+                float[] adapted = SimulateSuspension(activation);
+                for (int i = 0; i < native.Length; ++i)
+                    Check(Mathf.Abs(native[i] - adapted[i]) < 0.00001f,
+                        "Enabling vehicle simulation must preserve UVC substeps. Activation=" + activation + ", step=" + i);
+            }
+        }
+
+        private static float[] SimulateSuspension(int activation)
+        {
+            Scene scene = EditorSceneManager.NewPreviewScene();
+            try
+            {
+                int layer = Enumerable.Range(0, 32).First(candidate => !Physics.GetIgnoreLayerCollision(candidate, candidate));
+                var ground = new GameObject("Substep regression ground") { layer = layer };
+                SceneManager.MoveGameObjectToScene(ground, scene);
+                ground.transform.position = new Vector3(8192f, -0.25f, 8192f);
+                ground.AddComponent<BoxCollider>().size = new Vector3(40f, 0.5f, 40f);
+                var car = new GameObject("Substep regression chassis") { layer = layer };
+                SceneManager.MoveGameObjectToScene(car, scene);
+                car.transform.position = new Vector3(8192f, 0.8f, 8192f);
+                Rigidbody body = car.AddComponent<Rigidbody>();
+                body.mass = 1400f;
+                body.solverIterations = 2;
+                body.centerOfMass = new Vector3(0f, -0.1f, 0f);
+                var wheels = new WheelCollider[4];
+                for (int i = 0; i < wheels.Length; ++i)
+                {
+                    var wheelObject = new GameObject("Wheel " + i) { layer = layer };
+                    wheelObject.transform.SetParent(car.transform, false);
+                    wheelObject.transform.localPosition = new Vector3(i % 2 == 0 ? -0.75f : 0.75f, -0.2f, i < 2 ? 1.2f : -1.2f);
+                    WheelCollider wheel = wheels[i] = wheelObject.AddComponent<WheelCollider>();
+                    wheel.radius = 0.34f;
+                    wheel.center = new Vector3(0f, 0.08f, 0f);
+                    wheel.suspensionDistance = 0.2f;
+                    wheel.suspensionSpring = new JointSpring { spring = 25000f, damper = 3500f, targetPosition = 0.5f };
+                    wheel.mass = i < 2 ? 20f : 40f;
+                }
+                if (activation == 0)
+                    wheels[0].ConfigureVehicleSubsteps(40f, 100, 20);
+                else
+                {
+                    // No network or vendor gameplay ticks are needed to exercise the real simulation switch.
+                    var movement = car.AddComponent<UVCVehicleEntityMovement>();
+                    Property(movement, "Body", body);
+                    Property(movement, "Car", car.GetComponent<PG.CarController>());
+                    Field(movement, "_wheels").SetValue(movement, Array.Empty<PG.Wheel>());
+                    Field(movement, "_wheelColliders").SetValue(movement, wheels);
+                    var method = typeof(UVCVehicleEntityMovement).GetMethod("SetSimulation", BindingFlags.Instance | BindingFlags.NonPublic);
+                    method.Invoke(movement, new object[] { false });
+                    // Wheel.Awake runs while the adapter has disabled the colliders.
+                    foreach (WheelCollider wheel in wheels) wheel.ConfigureVehicleSubsteps(40f, 100, 20);
+                    method.Invoke(movement, new object[] { true });
+                    if (activation == 2)
+                    {
+                        method.Invoke(movement, new object[] { false });
+                        method.Invoke(movement, new object[] { true });
+                    }
+                }
+                var heights = new float[80];
+                PhysicsScene physics = scene.GetPhysicsScene();
+                for (int i = 0; i < heights.Length; ++i)
+                {
+                    physics.Simulate(0.05f);
+                    heights[i] = body.position.y;
+                }
+                return heights;
+            }
+            finally { EditorSceneManager.ClosePreviewScene(scene); }
         }
 
         private static void ValidateCrashDamage(Peer server, Peer clientA, Peer clientB, UVCValidationTransport network)
@@ -382,7 +461,9 @@ namespace MultiplayerARPG
 
         private static void ValidateRemoteCharacterCollider(Peer observer)
         {
+            int layer = Enumerable.Range(0, 32).First(candidate => !Physics.GetIgnoreLayerCollision(candidate, candidate));
             var go = new GameObject("Remote character collider regression");
+            go.layer = layer;
             try
             {
                 var entity = go.AddComponent<VehicleEntity>();
@@ -393,6 +474,7 @@ namespace MultiplayerARPG
                 Check(!movement.Functions.CanSimulateMovement(), "Remote character must not gain movement authority.");
                 Check(!movement.CacheCharacterController.enabled, "Remote character controller must remain disabled.");
                 var obstacle = new GameObject("Vehicle replica collision regression");
+                obstacle.layer = layer;
                 try
                 {
                     var body = obstacle.AddComponent<Rigidbody>();

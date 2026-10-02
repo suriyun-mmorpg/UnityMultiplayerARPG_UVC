@@ -52,16 +52,21 @@ namespace MultiplayerARPG
             var scene = EditorSceneManager.NewPreviewScene();
             try
             {
+                // Project collision matrices may disable Default-vs-Default contacts.
+                int layer = Enumerable.Range(0, 32).First(candidate => !Physics.GetIgnoreLayerCollision(candidate, candidate));
                 var car = new GameObject("Network chassis collision regression");
+                car.layer = layer;
                 UnityEngine.SceneManagement.SceneManager.MoveGameObjectToScene(car, scene);
                 var body = car.AddComponent<Rigidbody>();
                 body.isKinematic = true;
                 var shape = new GameObject("Compound chassis");
+                shape.layer = layer;
                 shape.transform.SetParent(car.transform, false);
                 shape.transform.localPosition = Vector3.up;
                 var box = shape.AddComponent<BoxCollider>();
                 box.size = new Vector3(2f, 1f, 4f);
                 var character = new GameObject("Stationary character");
+                character.layer = layer;
                 UnityEngine.SceneManagement.SceneManager.MoveGameObjectToScene(character, scene);
                 character.transform.position = Vector3.right * 4f;
                 var controller = character.AddComponent<CharacterController>();
@@ -110,6 +115,25 @@ namespace MultiplayerARPG
                     controller, character.transform.position, character.transform.rotation, out _, out depth) || depth < 0.001f),
                     "Rotating a compound chassis must not embed it in a standing character.");
                 Check(body.isKinematic, "Observer collision constraints must preserve kinematic replication.");
+                controller.enabled = false;
+                body.isKinematic = false;
+                body.useGravity = false;
+                body.position = new Vector3(8192f, 1000f, 8192f);
+                Vector3 slowVelocity = new Vector3(0.001f, 0f, 0.001f);
+                body.velocity = slowVelocity;
+                Vector3 unobstructedPosition = body.position;
+                collision.ConstrainSimulation(0.05f);
+                Check(body.velocity.Equals(slowVelocity) && body.position.Equals(unobstructedPosition),
+                    "An unobstructed car must retain its physics velocity even below world-position precision.");
+                body.velocity = new Vector3(2.31f, 0.47f, -1.19f);
+                Vector3 movingVelocity = body.velocity;
+                collision.ConstrainSimulation(0.05f);
+                Check(body.velocity.Equals(movingVelocity) && body.position.Equals(unobstructedPosition),
+                    "An unobstructed sweep must not introduce velocity or pose rounding corrections.");
+                body.Sleep();
+                Check(body.IsSleeping(), "The resting-body regression must start asleep.");
+                collision.ConstrainSimulation(0.05f);
+                Check(body.IsSleeping(), "Character collision queries must not wake an unobstructed resting car.");
             }
             finally { EditorSceneManager.ClosePreviewScene(scene); }
         }

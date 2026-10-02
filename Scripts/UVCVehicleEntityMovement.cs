@@ -217,6 +217,10 @@ namespace MultiplayerARPG
             }
             foreach (WheelCollider wheel in _wheelColliders)
                 wheel.enabled = simulate;
+            // Disabling the colliders recreates the PhysX vehicle and discards Wheel.Awake's substeps.
+            // Restore UVC's configuration after all wheels are enabled (once per vehicle).
+            if (simulate && _wheelColliders.Length > 0)
+                _wheelColliders[0].ConfigureVehicleSubsteps(40f, 100, 20);
         }
 
         private void RefreshInputOwner()
