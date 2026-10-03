@@ -228,7 +228,10 @@ MonoBehaviour:
   - {fileID: 11400000, guid: 66401780aa1f1a24782d11c6980883b2, type: 2}
   - {fileID: 11400000, guid: e43af8a3a8f9a7a478dc243c7b15ff5f, type: 2}
   - {fileID: 11400000, guid: f913fbdc47f19a4408bc793331f9583a, type: 2}
-  startItems: []
+  startItems:
+  - item: {fileID: 11400000, guid: 9fd79a88dbdfa7647a0ea5bbf0541d2d, type: 2}
+    level: 1
+    amount: 3
   startMap: {fileID: 11400000, guid: 98b8cb6525962ff49ac0496b4bd768eb, type: 2}
   useOverrideStartPosition: 0
   overrideStartPosition: {x: 0, y: 0, z: 0}

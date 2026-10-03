@@ -32,6 +32,8 @@ namespace MultiplayerARPG
         public PG.CarController Car { get; private set; }
         public Rigidbody Body { get; private set; }
         public UVCVehicleCrashDamage CrashDamage { get; private set; }
+        public VehicleFuelComponent Fuel { get; private set; }
+        public VehicleHornComponent Horn { get; private set; }
         public float StoppingDistance => _stoppingDistance;
         public MovementState MovementState { get; private set; }
         public ExtraMovementState ExtraMovementState => ExtraMovementState.None;
@@ -39,13 +41,17 @@ namespace MultiplayerARPG
         public float CurrentMoveSpeed => IsServer || _predicting ? Body.velocity.magnitude : _serverVelocity.magnitude;
         public bool IsPredicting => _predicting;
         public UVCVehicleTelemetry Telemetry => IsServer || _predicting ? UVCVehicleTelemetry.Capture(Car) : _telemetry;
-        public float Acceleration => CrashDamage != null && CrashDamage.enabled && CrashDamage.EngineCondition <= 0f ? 0f : _simulationInput.throttle;
+        public bool CanUseEnginePower => (Fuel == null || !Fuel.IsEmpty) &&
+            (CrashDamage == null || !CrashDamage.enabled || CrashDamage.EngineCondition > 0f);
+        public float Acceleration => CanUseEnginePower ? _simulationInput.throttle : 0f;
         public float BrakeReverse => Car is PG.BikeController && Car.CurrentGear < 0 &&
-            CrashDamage != null && CrashDamage.enabled && CrashDamage.EngineCondition <= 0f ? 0f : _simulationInput.brakeReverse;
+            !CanUseEnginePower ? 0f : _simulationInput.brakeReverse;
+        public float ServiceBrake => Car.Gearbox.AutomaticGearBox && Car.CurrentGear < 0
+            ? _simulationInput.throttle : _simulationInput.brakeReverse;
         public float Horizontal => _simulationInput.steering;
         public float Pitch => _simulationInput.pitch;
         public bool HandBrake => _simulationInput.handbrake;
-        public bool Boost => _simulationInput.boost && (CrashDamage == null || !CrashDamage.enabled || CrashDamage.EngineCondition > 0f);
+        public bool Boost => _simulationInput.boost && CanUseEnginePower;
 
         private UVCVehicleInput _localInput = UVCVehicleInput.Parked;
         private UVCVehicleInput _simulationInput = UVCVehicleInput.Parked;
@@ -92,6 +98,8 @@ namespace MultiplayerARPG
             _characterCollision = new UVCVehicleCharacterCollision(Body);
             _simulationInterpolation = Body.interpolation;
             CrashDamage = GetComponent<UVCVehicleCrashDamage>();
+            Fuel = GetComponent<VehicleFuelComponent>();
+            Horn = GetComponent<VehicleHornComponent>();
             _wheels = Car.Wheels;
             _wheelColliders = GetComponentsInChildren<WheelCollider>(true);
             _wheelPositions = new Vector3[_wheels.Length];
@@ -166,6 +174,8 @@ namespace MultiplayerARPG
             _localInput = _simulationInput = UVCVehicleInput.Parked;
             _lastLocalInputTime = float.NegativeInfinity;
             _controls.ClearInput();
+            Horn?.ResetLocalInput();
+            if (IsServer) Horn?.ServerSetHorn(false);
         }
 
         private void RefreshSimulation()
@@ -227,8 +237,7 @@ namespace MultiplayerARPG
         {
             if (IsServer && _controls.UpdateDriver(ConnectionId, DriverId))
             {
-                _localInput = _simulationInput = UVCVehicleInput.Parked;
-                _lastLocalInputTime = float.NegativeInfinity;
+                ResetControls();
             }
         }
 
@@ -242,6 +251,7 @@ namespace MultiplayerARPG
             RefreshInputOwner();
             _simulationInput = IsServer ? _controls.GetInput(Time.unscaledTime, _inputTimeout, CanDriveNow)
                 : CanDriveNow && Time.unscaledTime - _lastLocalInputTime <= _inputTimeout ? _localInput : UVCVehicleInput.Parked;
+            if (IsServer) Horn?.ServerSetHorn(_simulationInput.horn);
             if (_predicting)
                 ReconcilePrediction();
             MovementState = Car.VehicleIsGrounded ? MovementState.IsGrounded : MovementState.None;
@@ -311,6 +321,7 @@ namespace MultiplayerARPG
                 return;
             RefreshInputOwner();
             _localInput = input.Sanitize();
+            Horn?.SetLocalPresentation(_localInput.horn);
             _lastLocalInputTime = Time.unscaledTime;
             if (IsServer)
                 _controls.SetLocal(_localInput, Time.unscaledTime);

@@ -12,6 +12,7 @@ namespace MultiplayerARPG
         public float pitch;
         public bool handbrake;
         public bool boost;
+        public bool horn;
 
         public static UVCVehicleInput Parked => new UVCVehicleInput { handbrake = true };
 
@@ -25,6 +26,7 @@ namespace MultiplayerARPG
                 pitch = ClampFinite(pitch, -1f, 1f),
                 handbrake = handbrake,
                 boost = boost,
+                horn = horn,
             };
         }
 
@@ -38,7 +40,7 @@ namespace MultiplayerARPG
             writer.Put(input.throttle);
             writer.Put(input.brakeReverse);
             writer.Put(input.pitch);
-            writer.Put((byte)((input.handbrake ? 1 : 0) | (input.boost ? 2 : 0)));
+            writer.Put((byte)((input.handbrake ? 1 : 0) | (input.boost ? 2 : 0) | (input.horn ? 4 : 0)));
         }
 
         public static UVCVehicleInput Read(NetDataReader reader)
@@ -51,6 +53,7 @@ namespace MultiplayerARPG
             byte flags = reader.GetByte();
             input.handbrake = (flags & 1) != 0;
             input.boost = (flags & 2) != 0;
+            input.horn = (flags & 4) != 0;
             return input.Sanitize();
         }
     }

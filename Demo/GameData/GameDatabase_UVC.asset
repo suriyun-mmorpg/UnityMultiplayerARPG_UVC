@@ -101,6 +101,7 @@ MonoBehaviour:
   - {fileID: 11400000, guid: 0a439d3c316c36f4cae03a253c8839d4, type: 2}
   - {fileID: 11400000, guid: 0241a06b54a0a45968fea89c5e2dabdb, type: 2}
   - {fileID: 11400000, guid: eb55a8b7b8df844f88b4e2241b36c257, type: 2}
+  - {fileID: 11400000, guid: 9fd79a88dbdfa7647a0ea5bbf0541d2d, type: 2}
   itemCraftFormulas:
   - {fileID: 11400000, guid: 4fa8022457399b045aa759a2adf444be, type: 2}
   - {fileID: 11400000, guid: f3bf4536f24588043986c153c1e7e430, type: 2}

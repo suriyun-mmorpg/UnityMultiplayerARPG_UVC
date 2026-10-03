@@ -13,6 +13,9 @@ namespace MultiplayerARPG
         [SerializeField] private string _brakeReverseAxis;
         [SerializeField] private string _handbrakeButton = "Jump";
         [SerializeField] private string _boostButton = "Sprint";
+        [Tooltip("Optional configured input button. The keyboard fallback can be changed or set to None.")]
+        [SerializeField] private string _hornButton;
+        [SerializeField] private KeyCode _hornKey = KeyCode.H;
         private UVCVehicleEntityMovement _movement;
         private UVCVehicleInput _mobileInput;
         private bool _useMobileInput;
@@ -41,6 +44,8 @@ namespace MultiplayerARPG
                 boost = !string.IsNullOrEmpty(_boostButton) && InputManager.GetButton(_boostButton),
                 pitch = ReadPitch(),
             };
+            input.horn = (_movement.Horn != null && _movement.Horn.LocalInput) ||
+                InputManager.GetButton(_hornButton) || InputManager.GetKey(_hornKey);
             _movement.SetInput(input);
         }
 
@@ -50,6 +55,7 @@ namespace MultiplayerARPG
         protected override void ResetInput()
         {
             _mobileInput = default;
+            if (_movement != null) _movement.Horn?.ResetLocalInput();
             if (_movement != null && CanDrive)
                 _movement.SetInput(UVCVehicleInput.Parked);
         }
@@ -63,6 +69,7 @@ namespace MultiplayerARPG
         public void SetHandbrake(bool value) { _useMobileInput = true; _mobileInput.handbrake = value; }
         public void SetBoost(bool value) { _useMobileInput = true; _mobileInput.boost = value; }
         public void SetPitch(float value) { _useMobileInput = true; _mobileInput.pitch = value; }
+        public void SetHorn(bool value) { if (_movement != null && CanDrive) _movement.Horn?.SetLocalInput(value); }
         public void UseBoundInputs() { _useMobileInput = false; _mobileInput = default; }
     }
 }

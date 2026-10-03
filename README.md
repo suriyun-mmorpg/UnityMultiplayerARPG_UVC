@@ -15,6 +15,7 @@ Connects PG's Universal Vehicle Controller cars to MMORPG KIT vehicles and its p
 | Vertical, negative | S | Brake / reverse, using UVC gearbox logic |
 | Jump | Space | Handbrake |
 | Sprint | Shift | Boost (enabled on the demo car) |
+| Horn key | H (hold) | Sound the horn while driving |
 | ExitVehicle | Project-configured binding | Leave seat |
 | CameraRotate | Project-configured binding | Camera control inherited from the kit |
 | Motorcycle pitch | Q / E | Lean back / forward on the ground; pitch in the air |
@@ -28,6 +29,30 @@ The demo includes two S34 cars and one motorcycle prefab variant, seat-specific 
 Body lean, wheels, handlebars and forks synchronize to observers. The rear fork parent is authored in the prefab so the vendor does not create a different hierarchy at runtime. The local UVC crash latch is disabled through its two thresholds because its private state is not replicated; the motorcycle uses the kit's HP, engine/wheel condition and destruction path instead. UVC's balancing and steering remain active. The rider is hidden until a suitable riding animation/IK pose is provided. The bike retains 1,000 HP and boost for this demo.
 
 Use **Tools > MMORPG KIT > UVC Integration > Add Motorcycle Demo** to add the bike to an existing driving demo. Rerunning it preserves the motorcycle prefab and avoids duplicate scene vehicles, database entries and controller mappings.
+
+### Fuel
+
+Use **Tools > MMORPG KIT > UVC Integration > Add Fuel Demo** to configure the cars and motorcycle, install the fuel HUD, and add a green refuelling area. Park inside the area to refill for free. New demo characters also start with three 2-litre cans; park and press **REFUEL (CAN)** on the HUD to use one. A can is consumed only when its whole contents fit in the tank. Existing characters can use the pump without needing new starting items.
+
+Demo tanks hold 10 litres and start with 2 litres. The demo consumption is deliberately noticeable: 0.12 litres/minute at idle plus 2.88 litres/minute at full throttle. Adjust these fields on `VehicleFuelComponent` for your game. Normal fuel and UVC's boost reserve are separate.
+
+For other UVC prefabs, add `VehicleFuelComponent` and `UVCVehicleFuelAdapter` to the vehicle root. Set the capacity, starting amount, consumption rates, and compatible item/amount pairs. A vehicle without the optional tank keeps its existing behaviour. Consumption uses the server's simulated engine and throttle; clients cannot supply a fuel amount. Empty tanks stop engine power and boost while retaining steering, braking, handbrake, ABS and body physics. Refuelling allows the normal throttle-to-start behaviour, subject to engine damage.
+
+Remaining fuel uses a separate server-to-client entity sync field, normally published every half-second and immediately when empty or refilled. Vehicle and character movement packet layouts are unchanged. Fuel remains on the vehicle through driver/seat changes. Persistent vehicle systems can save `RemainingFuel` and call `ServerRestoreFuel` after identity initialization; database persistence for owned/summoned vehicles is not added automatically.
+
+Production pumps can call `ServerRefuel` after validating proximity, fuel compatibility and payment. `UVCFuelDemoStation` is a free sample that validates server-side vehicle position and speed and deduplicates vehicles with multiple colliders. `CallCmdRefuelVehicle(vehicleObjectId, itemIndex)` provides inventory refuelling; the server validates the current item, tank space, character distance and vehicle speed before consuming it.
+
+### Horn
+
+Hold **H** or the **HORN** HUD button in the driver seat. Release it to stop. The horn works with the engine stopped or an empty fuel tank. Passengers cannot operate it; leaving the seat, changing drivers, blocked input and the movement input timeout release it.
+
+Use **Tools > MMORPG KIT > UVC Integration > Add Horn Demo** to configure the demo cars and motorcycle and install the horn UI. In WZM it configures `UVC_S34_Stock` and `UVC_S34_Race` and the mobile gameplay HUD. Rerunning the builder preserves existing assigned horn audio and UI prefabs. The included original dual-tone sample is stored with the demo game data.
+
+For another UVC vehicle, add `VehicleHornComponent` to its root and assign a dedicated looping 3D `AudioSource`. Set Play On Awake off and assign your horn clip, volume, distance and mixer group. Keep this source separate from engine and tire audio. The movement adapter handles validated server input and immediate feedback for the local driver. The demo source uses volume 0.65, a 5-metre minimum distance and a 60-metre maximum distance.
+
+Change Horn Key or the optional Horn Button binding on `UVCVehiclePlayerController` to remap H. Mobile controls can use `UIVehicleHornPressHandler`, or call `SetHorn(true/false)` on the active vehicle controller with matching press/release events. Keep the `UIVehicleHorn` observer outside its hidden Controls Root; the supplied prefab does this automatically. Horn input does not switch keyboard pedals into mobile-input mode.
+
+Horn input uses a spare bit in the existing UVC input flags byte: its input payload remains 17 bytes and movement snapshots are unchanged. A separate server-to-client boolean sync field publishes horn state to observers. Update the server and clients together because adding a network behaviour changes the vehicle's behaviour layout. Tests cover state replication, delayed packets, driver changes, timeout, focus loss, and held-button release. Audible mixing and range still need a live multiplayer check.
 
 ## Runtime setup
 
